@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """
-Capture une image YUYV depuis la webcam USB et la convertit en PPM.
+Capture une image MJPEG depuis la webcam USB via v4l2-ctl.
+Résolution maximale : 1920x1080
 """
 import subprocess
 import sys
 from pathlib import Path
 from datetime import datetime
 
-DEVICE      = "/dev/video0"
-WIDTH       = 1920
-HEIGHT      = 1080
-OUTPUT_DIR  = Path(__file__).parent.parent / "output"
+DEVICE     = "/dev/video0"
+WIDTH      = 1920
+HEIGHT     = 1080
+OUTPUT_DIR = Path(__file__).parent.parent / "output"
 
 def capture() -> Path:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -18,14 +19,12 @@ def capture() -> Path:
     out_path  = OUTPUT_DIR / f"capture_{timestamp}.jpg"
 
     cmd = [
-        "ffmpeg", "-y",
-        "-f", "v4l2",
-        "-input_format", "mjpeg",
-        "-video_size", f"{WIDTH}x{HEIGHT}",
-        "-i", DEVICE,
-        "-frames:v", "1",
-        "-q:v", "2",
-        str(out_path)
+        "v4l2-ctl",
+        f"--device={DEVICE}",
+        f"--set-fmt-video=width={WIDTH},height={HEIGHT},pixelformat=MJPG",
+        "--stream-mmap",
+        "--stream-count=1",
+        f"--stream-to={str(out_path)}"
     ]
 
     result = subprocess.run(cmd, capture_output=True, text=True)
@@ -33,7 +32,7 @@ def capture() -> Path:
         print(f"Erreur capture : {result.stderr}", file=sys.stderr)
         sys.exit(1)
 
-    print(f"Image capturée : {out_path}")
+    print(f"Image capturée : {out_path} ({out_path.stat().st_size} octets)")
     return out_path
 
 if __name__ == "__main__":
