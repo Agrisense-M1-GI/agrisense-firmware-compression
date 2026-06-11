@@ -1,16 +1,16 @@
-# AgriSense - Firmware Nœud Capteur
+# algo/mjpeg-webcam
 
-Pipeline de compression d'images pour WSN agricole.
+Compression MJPEG embarquée dans la webcam USB (référence la plus simple).
 
-## Branches
+## Principe
 
-| Branche | Description |
-|---|---|
-| `algo/mjpeg-webcam` | Compression MJPEG embarquée webcam USB (référence) |
-| `algo/jpeg-baseline` | JPEG standard libjpeg IJG v9e |
-| `algo/agriJPEG-v1` | AgriJPEG v1 (Q_vegetation + Q_fond + 4:1:4 + rANS) |
-| `algo/ADRES` | ADRES |
-| `algo/OTS-WZ` | OTS-WZ |
+La webcam UVC compresse elle-même les images en MJPEG via son DSP interne.
+Le Pi récupère directement le flux compressé via ffmpeg sans aucun traitement supplémentaire.
+
+## Limites
+
+- PSNR et SSIM non calculables (pas d'accès à l'image brute avant compression)
+- Qualité fixée par le driver webcam
 
 ## Utilisation
 
