@@ -55,6 +55,7 @@ sys.path.insert(0, str(DECODERS_DIR))
 import metrics as qmetrics          # noqa: E402  (metrics.py, same folder as main.py)
 import wz_oseg_decode                # noqa: E402  (decoders/wz_oseg_decode.py)
 import adres_decode                  # noqa: E402  (decoders/adres_decode.py)
+import reference_jpeg_decode         # noqa: E402  (decoders/reference_jpeg_decode.py, branch reference/jpeg)
 
 # ---------------------------------------------------------------------------
 # App
@@ -230,6 +231,7 @@ async def test_submit_wzoseg(
                          0.114 * original_rgb[:, :, 2]).astype(np.uint8)
             y_rec = wz_oseg_decode.reconstruct_from_dct_sparse(dct_coeffs, width, height, bw, bh, side_gray)
             wz_rgb = wz_oseg_decode.gray_to_rgb(y_rec)
+            Image.fromarray(wz_rgb, "RGB").save(run_dir / "reconstructed_wz.png")
 
             wz_metrics_vals = parse_metrics_txt(paths["wz_metrics"])
             wz_mask = np.array(Image.open(paths["wz_otsu_mask"]).convert("L"))
@@ -311,6 +313,7 @@ async def test_submit_adres(
             try:
                 roi_mask, roi_png_bytes, bg_png_bytes, params = adres_decode.read_compressed(paths[comp_key])
                 adres_rgb = adres_decode.reconstruct_image(roi_mask, roi_png_bytes, bg_png_bytes, params)
+                Image.fromarray(adres_rgb, "RGB").save(run_dir / f"reconstructed_adres_{profile}.png")
 
                 adres_metrics_vals = parse_metrics_txt(paths[metrics_key])
                 adres_mask = np.array(Image.open(paths[mask_key]).convert("L"))
@@ -336,6 +339,119 @@ async def test_submit_adres(
                     "compression_ratio": None,
                 })
                 print(f"[ADRES-{profile}] Erreur reconstruction {image_id}: {exc}")
+
+        for row in results:
+            append_result_row(row)
+
+        return JSONResponse({"status": "ok", "image_id": image_id, "rows_appended": len(results)})
+
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Erreur traitement {image_id}: {exc}")
+
+
+@app.post("/test/submit/reference/{node_id}/{image_id}")
+async def test_submit_reference(
+    node_id: str,
+    image_id: str,
+    original: UploadFile = File(...),
+    jpeg_compressed: UploadFile = File(...),
+    jpeg_metrics: UploadFile = File(...),
+    jp2roi_compressed: UploadFile = File(...),
+    jp2roi_roi_mask: UploadFile = File(...),
+    jp2roi_metrics: UploadFile = File(...),
+):
+    """Independent endpoint for the branch reference/jpeg's pipeline_test.py.
+    Two methods, both decoded here:
+      - "JPEG": plain Pillow-encoded JPEG, decoded directly by Pillow.
+      - "JPEG2000-ROI-2stream": OpenJPEG dual-stream, region-differentiated
+        encoding (NOT the codestream-native Annex H ROI feature -- see
+        reference_jpeg_decode.py / jpeg2000_roi_test.py docstrings for why).
+    Naming is deliberately explicit ("2stream") so results.csv never implies
+    a native-ROI JPEG2000 measurement that wasn't actually performed."""
+    run_dir = TEST_RUN_DIR / "reference" / node_id / image_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    paths = {
+        "original": run_dir / "original.ppm",
+        "jpeg_compressed": run_dir / "jpeg_compressed.jpg",
+        "jpeg_metrics": run_dir / "jpeg_metrics.txt",
+        "jp2roi_compressed": run_dir / "jp2roi_compressed.jp2roi",
+        "jp2roi_roi_mask": run_dir / "jp2roi_roi_mask.ppm",
+        "jp2roi_metrics": run_dir / "jp2roi_metrics.txt",
+    }
+    for key, upload in {
+        "original": original,
+        "jpeg_compressed": jpeg_compressed, "jpeg_metrics": jpeg_metrics,
+        "jp2roi_compressed": jp2roi_compressed, "jp2roi_roi_mask": jp2roi_roi_mask,
+        "jp2roi_metrics": jp2roi_metrics,
+    }.items():
+        await save_upload(upload, paths[key])
+
+    try:
+        original_img = Image.open(paths["original"]).convert("RGB")
+        original_rgb = np.array(original_img)
+        ref_mask = reference_otsu_mask(np.array(original_img.convert("L")))
+        timestamp = datetime.now().isoformat()
+
+        results = []
+
+        # --- JPEG (plain, Pillow) ---------------------------------------
+        try:
+            jpeg_rgb = reference_jpeg_decode.decode_jpeg(paths["jpeg_compressed"])
+            jpeg_metrics_vals = parse_metrics_txt(paths["jpeg_metrics"])
+            Image.fromarray(jpeg_rgb, "RGB").save(run_dir / "reconstructed_jpeg.png")
+
+            results.append({
+                "timestamp": timestamp, "node_id": node_id, "image_id": image_id,
+                "algorithm": "JPEG", "profile": "-",
+                "psnr_db": round(qmetrics.compute_psnr(original_rgb, jpeg_rgb), 3),
+                "ssim": round(qmetrics.compute_ssim(original_rgb, jpeg_rgb), 4),
+                "mask_iou": None, "mask_dice": None,  # JPEG has no ROI mask
+                "cpu_time_ms": jpeg_metrics_vals.get("cpu_time_ms"),
+                "memory_kb": jpeg_metrics_vals.get("memory_kb"),
+                "compressed_bytes": jpeg_metrics_vals.get("compressed_bytes"),
+                "compression_ratio": jpeg_metrics_vals.get("compression_ratio"),
+            })
+        except Exception as exc:
+            results.append({
+                "timestamp": timestamp, "node_id": node_id, "image_id": image_id,
+                "algorithm": "JPEG", "profile": "ERROR",
+                "psnr_db": None, "ssim": None, "mask_iou": None, "mask_dice": None,
+                "cpu_time_ms": None, "memory_kb": None, "compressed_bytes": None,
+                "compression_ratio": None,
+            })
+            print(f"[JPEG] Erreur reconstruction {image_id}: {exc}")
+
+        # --- JPEG2000-ROI-2stream ----------------------------------------
+        try:
+            jp2roi_rgb, jp2roi_pixel_mask = reference_jpeg_decode.reconstruct_jpeg2000_roi(
+                paths["jp2roi_compressed"]
+            )
+            Image.fromarray(jp2roi_rgb, "RGB").save(run_dir / "reconstructed_jp2roi.png")
+
+            jp2roi_metrics_vals = parse_metrics_txt(paths["jp2roi_metrics"])
+            iou, dice = qmetrics.compute_iou_dice(ref_mask, jp2roi_pixel_mask)
+
+            results.append({
+                "timestamp": timestamp, "node_id": node_id, "image_id": image_id,
+                "algorithm": "JPEG2000-ROI-2stream", "profile": "-",
+                "psnr_db": round(qmetrics.compute_psnr(original_rgb, jp2roi_rgb), 3),
+                "ssim": round(qmetrics.compute_ssim(original_rgb, jp2roi_rgb), 4),
+                "mask_iou": round(iou, 4), "mask_dice": round(dice, 4),
+                "cpu_time_ms": jp2roi_metrics_vals.get("cpu_time_ms"),
+                "memory_kb": jp2roi_metrics_vals.get("memory_kb"),
+                "compressed_bytes": jp2roi_metrics_vals.get("compressed_bytes"),
+                "compression_ratio": jp2roi_metrics_vals.get("compression_ratio"),
+            })
+        except Exception as exc:
+            results.append({
+                "timestamp": timestamp, "node_id": node_id, "image_id": image_id,
+                "algorithm": "JPEG2000-ROI-2stream", "profile": "ERROR",
+                "psnr_db": None, "ssim": None, "mask_iou": None, "mask_dice": None,
+                "cpu_time_ms": None, "memory_kb": None, "compressed_bytes": None,
+                "compression_ratio": None,
+            })
+            print(f"[JPEG2000-ROI-2stream] Erreur reconstruction {image_id}: {exc}")
 
         for row in results:
             append_result_row(row)

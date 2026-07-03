@@ -1,71 +1,100 @@
-# ADRES
+# reference/jpeg
 
 ## Principle
 
-ADRES (region-aware adaptive compression) is a node-side image pipeline
-designed for scenarios where each frame must be processed
-independently (no reliance on temporal correlation between frames),
-trading that independence for a simpler, deterministic-latency
-encoder.
+This branch produces the JPEG and JPEG2000-ROI reference measurements
+needed to complete Table 4 of the AgriJPEG article (`JPEG` and
+`JPEG 2000 ROI` rows), but measured directly on the target embedded
+hardware (Raspberry Pi Zero 2W) rather than on the desktop machine used
+for the original 294-image run described in the paper (Section 5.2 /
+5.3, "Software-only prototype" limitation).
 
-1. **Region-of-interest detection.** The node computes a global Otsu
-   threshold on the luminance channel, then evaluates each 16x16 block:
-   a block is flagged as ROI if more than 25% of its pixels are above
-   the Otsu threshold (bright / vegetation-like), matching the same
-   foreground convention used elsewhere (Otsu: `gray > threshold` =
-   foreground).
+Two methods are implemented:
 
-2. **Independent quantization of ROI and background.** ROI pixels are
-   quantized with a fine step (`q_roi`); background pixels are
-   point-sampled at a coarser stride (`subsample`) and quantized with a
-   coarser step (`q_bg`). Two operating profiles are available:
-   - **Quality (Q):** finer quantization, larger transmitted payload.
-   - **Economy (E):** coarser quantization/sub-sampling, smaller payload.
+1. **JPEG** -- standard JPEG encoding via Pillow (its bundled
+   libjpeg), quality 75. **Note the caveat explicitly:** this is
+   Pillow's own libjpeg build, not the IJG libjpeg-9e source that was
+   separately downloaded and compiled (`cjpeg`/`djpeg`, see
+   `tree.txt` / the project context doc). It was kept as-is on request
+   rather than switched to the compiled `cjpeg`/`djpeg` binaries. If a
+   result closer to "the exact library I downloaded" is needed later,
+   swap `jpeg_test.py`'s encoder call for a subprocess call to
+   `cjpeg`/`djpeg` -- the rest of the pipeline (upload, decode,
+   metrics) does not need to change.
 
-3. **Lossless entropy coding.** Rather than transmitting raw quantized
-   bytes with per-pixel position tags, two images are built and each is
-   compressed independently with **PNG lossless compression**
-   (libpng, level 9): a full-resolution canvas holding the quantized
-   ROI pixels (zero elsewhere — highly compressible under PNG's DEFLATE
-   stage) and the sub-sampled background. At the sink, the background
-   is bicubic-upsampled and the ROI canvas is overlaid using the
-   transmitted block-level ROI mask.
+2. **JPEG2000-ROI-2stream** -- a real, working JPEG2000 encoder
+   (OpenJPEG, via `opj_compress`/`opj_decompress`), with genuine
+   region-differentiated quality allocation. **Important limitation,
+   stated plainly:** OpenJPEG does not implement the JPEG2000
+   standard's native spatial Region-of-Interest feature (Annex H,
+   "Maxshift"). Its own `-ROI` flag only up-shifts an entire colour
+   *component*, not an arbitrary spatial mask -- this is documented by
+   the OpenJPEG project itself and confirmed on their mailing list: no
+   spatial Annex H implementation has ever been merged. So instead of
+   claiming something the library cannot do, this branch implements
+   a **two-stream workaround**, which is a real and reproducible use
+   of JPEG2000, just not the codestream-native ROI marker:
+   - A block-level ROI mask is computed with the *same* Otsu
+     convention already used by `algo/adres` and `algo/wz-oseg`
+     (global Otsu on luminance, 16×16 blocks, block flagged ROI if
+     >25% of its pixels are above threshold) -- kept identical across
+     branches so the four methods stay comparable.
+   - A full-resolution "ROI stream" is encoded with `opj_compress`,
+     after flattening every non-ROI block to a neutral grey (this
+     lets OpenJPEG's rate control spend its bit budget on ROI content,
+     since flattened regions contribute near-zero entropy).
+   - A bicubic-downsampled "background stream" is encoded separately,
+     at a coarser target ratio.
+   - Both streams + the block mask are packed into one container file
+     (`compressed.jp2roi`, format `AGRIJ2K_ROI`, see
+     `jpeg2000_roi_test.py` header for the exact layout).
+   - The sink decodes both real JP2 streams with `opj_decompress` and
+     composites: ROI pixels from the ROI stream, everything else from
+     the up-sampled background stream.
 
-**Scope note:** no per-pixel position metadata is transmitted; pixel
-placement is entirely reconstructed from the compact block-level ROI
-mask, which is what allows ADRES to avoid the storage overhead of
-earlier prototype iterations.
+   In `results.csv` this method is logged as **`JPEG2000-ROI-2stream`**,
+   deliberately not just `JPEG2000-ROI` or `JPEG2000`, so nobody
+   downstream mistakes it for a measurement of the standard's native
+   ROI feature.
 
-## Prerequisites to re-run the test after cloning this branch
+## Architecture (same client/server split as algo/adres, algo/wz-oseg)
 
-1. A C/C++ toolchain **and libpng development headers** to compile the
-   node-side encoder (PNG compression is done in C via libpng, not
-   deferred to Python).
-2. Python 3 with the packages below, on both the node (Pi) and the
-   server (laptop) sides.
-3. A dataset of RGB images accessible to the node.
-4. The server process reachable over the network from the node
-   (same LAN, correct IP, port 8000 open).
-
-## Dependencies
-
-**On the node (Raspberry Pi or equivalent):**
-```bash
-sudo apt update && sudo apt install -y build-essential libpng-dev
-python3 -m pip install --break-system-packages pillow requests
 ```
-Compile the encoder:
-```bash
-gcc -O2 -Wall -o adres/encode adres/encode.cpp -lpng -lz -lm
+Pi (node)                              Laptop (server, main.py)
+----------                             -------------------------
+pipeline_test.py
+  for each image in dataset:
+    -> jpeg_test.py            ---upload--->  /test/submit/reference/{node}/{image}
+    -> jpeg2000_roi_test.py    ---upload--->      decodes both methods,
+                                                    computes PSNR/SSIM
+                                                    (+ IoU/Dice for
+                                                    JPEG2000-ROI-2stream),
+                                                    appends 2 rows to
+                                                    data/results.csv
 ```
+
+The original PPM is uploaded alongside both compressed artifacts so
+the server can compute quality metrics against ground truth, exactly
+like the ADRES/WZ-OSEG branches. As with those branches, the "mask
+IoU/Dice" reference is a server-side Otsu recomputation on the
+uploaded original -- it measures **mask transmission fidelity**, not
+accuracy against a hand-annotated ground truth (none exists for this
+dataset).
+
+## Prerequisites
+
+**On the node (Raspberry Pi):**
+```bash
+sudo apt update && sudo apt install -y libopenjp2-tools
+python3 -m pip install --break-system-packages pillow requests numpy
+```
+Verify: `opj_compress -h` should print usage, not "command not found".
 
 **On the server (laptop):**
 ```bash
+sudo apt install -y libopenjp2-tools   # opj_decompress needed here too
 python3 -m pip install --break-system-packages fastapi uvicorn python-multipart pillow numpy scikit-image
 ```
-No extra native library is needed server-side: the Python decoder reads
-the PNG streams directly with Pillow (which links its own libpng), it
-does not call libpng itself.
 
 ## Running the test
 
@@ -74,8 +103,22 @@ does not call libpng itself.
 cd server && python3 main.py
 
 # node (Pi)
-python3 pipeline_test.py --dataset <path-to-images> \
+python3 pipeline_test.py --dataset <path-to-640x480-ppm-dataset> \
     --server http://<laptop-ip>:8000 --node-id <any-id>
 ```
-Results are appended to `server/data/results.csv` on the server, two
-rows per image (`algorithm = ADRES`, `profile = Q` and `profile = E`).
+Results are appended to `server/data/results.csv`, two rows per image
+(`algorithm = JPEG` and `algorithm = JPEG2000-ROI-2stream`).
+
+## Known limitations of this branch (stated directly, not hidden)
+
+- JPEG uses Pillow's bundled libjpeg, not the separately compiled
+  IJG libjpeg-9e binaries (see point 1 above) -- a deliberate choice
+  for now, easy to change later if needed.
+- JPEG2000-ROI-2stream is not a measurement of JPEG2000 Annex H ROI;
+  it is a documented two-stream workaround using real JPEG2000
+  encoding. Any comparison against literature figures that assume
+  native ROI encoding should account for this difference.
+- The flattening-based bit allocation trick has no formal
+  rate-distortion guarantee (unlike true Maxshift coefficient
+  up-shifting); its effectiveness was verified empirically on this
+  branch's own test images, not derived analytically.

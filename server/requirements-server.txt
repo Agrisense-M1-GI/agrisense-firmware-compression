@@ -1,0 +1,26 @@
+# reference/jpeg -- dépendances Python côté SERVEUR (laptop, agrisense-server/main.py)
+# Installation : pip install -r requirements-server.txt
+# (dans le venv de agrisense-server)
+#
+# C'est l'erreur que tu as rencontrée : "skimage" n'est PAS le nom du
+# paquet pip -- le paquet s'appelle scikit-image, le module importé
+# s'appelle skimage. D'où l'échec "pip install skimage".
+
+fastapi>=0.110
+uvicorn>=0.29
+python-multipart>=0.0.9
+Pillow>=10.0
+numpy>=1.24
+scikit-image>=0.21
+
+# --- Dépendance qui N'EST PAS un paquet pip -------------------------------
+# reference_jpeg_decode.py (branche reference/jpeg) appelle en
+# sous-processus opj_decompress (OpenJPEG) pour décoder les artefacts
+# JPEG2000-ROI-2stream envoyés par le nœud. Sans ce binaire, cette
+# méthode échouera systématiquement côté serveur (l'endpoint continuera
+# à fonctionner pour JPEG, mais loggera une ligne ERROR pour
+# JPEG2000-ROI-2stream) :
+#
+#   sudo apt update && sudo apt install -y libopenjp2-tools
+#
+# Vérifier après installation : opj_decompress -h doit afficher l'aide.

@@ -1,0 +1,26 @@
+# reference/jpeg -- dépendances Python côté NŒUD (Raspberry Pi)
+# Installation : python3 -m pip install --break-system-packages -r requirements.txt
+#
+# Ces trois paquets suffisent à pipeline_test.py, jpeg_test.py et
+# jpeg2000_roi_test.py.
+
+Pillow>=10.0
+numpy>=1.24
+requests>=2.31
+
+# --- Dépendance qui N'EST PAS un paquet pip -------------------------------
+# jpeg2000_roi_test.py appelle en sous-processus les binaires opj_compress /
+# opj_decompress (OpenJPEG). Ils ne s'installent pas via pip :
+#
+#   sudo apt update && sudo apt install -y libopenjp2-tools
+#
+# Vérifier après installation : opj_compress -h doit afficher l'aide,
+# pas "command not found".
+
+# --- Optionnel : compute_metrics.py / generate_dataset_complete.py -------
+# Ces deux scripts existent dans le dépôt mais ne sont PAS utilisés par
+# pipeline_test.py (qui délègue le calcul PSNR/SSIM au serveur, comme
+# ADRES/WZ-OSEG). Ils restent utilisables en local, sans réseau, si
+# besoin d'un test rapide sur le Pi seul. Si tu comptes les utiliser,
+# décommente la ligne suivante :
+# scikit-image>=0.21
