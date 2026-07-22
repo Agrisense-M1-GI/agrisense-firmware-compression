@@ -14,8 +14,8 @@ import os
 # --- Filesystem layout (Section 3.1) -----------------------------------
 # These live OUTSIDE the git repo, at the root of the node. They are the
 # same regardless of which branch is currently checked out.
-NODE_ROOT = os.path.expanduser("~/agrisense-node")
-DATASET_DIR = os.path.join(NODE_ROOT, "dataset")
+NODE_ROOT = os.path.expanduser("~")
+DATASET_DIR = os.path.join(NODE_ROOT, "DATASET")
 LOGS_DIR = os.path.join(NODE_ROOT, "logs")
 RESULTS_DIR = os.path.join(NODE_ROOT, "results")
 
@@ -58,6 +58,9 @@ GATE_BLOCKS_TRANSMISSION = True
 # --- VARI vegetation classification (Section 4.2, step 4) --------------
 VARI_MEAN_THRESHOLD = 0.1     # block is "vegetation" if VARI_mean > 0.1
 VARI_VEG_FRACTION = 0.50      # and vegetation-pixel fraction > 50%
+
+# --- Composite ROI mask (Otsu block-conversion + VARI, combined by OR) --
+OTSU_ROI_BLOCK_FRACTION = 0.25  # block counts as ROI if >=25% of its pixels are Otsu-class 255
 
 # --- Capture format (Section 2.2) ---------------------------------------
 CAPTURE_WIDTH = 1920

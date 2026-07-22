@@ -53,7 +53,7 @@ compression/
 ## Git workflow
 
 ```bash
-cd ~/agrisense-node/agrisense
+cd ~/firmware
 git checkout -b algo/jpeg-baseline
 # copy the contents of this folder to the repo root
 git add .
@@ -64,6 +64,6 @@ To switch configurations later, you only ever do:
 ```bash
 git checkout algo/<other-branch>
 ```
-`startup.py` and the `dataset/`, `logs/`, `results/` folders never move —
+`startup.py` and the `DATASET/`, `logs/`, `results/` folders never move —
 only `pipeline.py`, `pipeline_test.py`, `capture/`, `common/`, `compression/`
 change.

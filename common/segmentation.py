@@ -4,8 +4,12 @@ segmentation.py
 Otsu thresholding on the luminance (Y) channel, with morphological
 refinement (opening then closing, 3x3 kernel) — Section 4.2, step 3.
 
-Produces a binary mask (uint8, 0/255) the same size as the input image,
-used afterwards by vari.py to classify blocks as vegetation/background.
+Produces a binary mask (uint8, 0/255) the same size as the input image.
+Class 255 = ROI (vegetation, on this dataset). Combined with the VARI
+block classification in vari.py (classify_blocks_composite, logical OR
+at 8x8 block granularity) into the single composite mask used both for
+Qveg/Qbg table selection at compression time and for zone-based
+PSNR/SSIM on the station side.
 """
 
 import cv2
