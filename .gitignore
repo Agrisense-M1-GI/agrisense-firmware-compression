@@ -3,3 +3,18 @@ output/
 __pycache__/
 *.o
 *.so
+
+# jpeg-9e build artifacts
+compression/lib/jpeg-9e/.deps/
+compression/lib/jpeg-9e/.libs/
+compression/lib/jpeg-9e/*.o
+compression/lib/jpeg-9e/*.lo
+compression/lib/jpeg-9e/*.la
+compression/lib/jpeg-9e/cjpeg
+compression/lib/jpeg-9e/djpeg
+compression/lib/jpeg-9e/jpegtran
+compression/lib/jpeg-9e/libjpeg*
+compression/lib/jpeg-9e/Makefile
+compression/lib/jpeg-9e/config.status
+compression/lib/jpeg-9e/config.log
+compression/lib/jpeg-9e/jconfig.h
