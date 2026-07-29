@@ -1,19 +1,18 @@
-# algo/jpeg-baseline
+# algo/jpeg-4x4x0
 
-**Role in the study (Section 4.3):** Experience A — the baseline of the
-ablation study. Every other JPEG-family branch is compared against this one.
+**Role in the study (Section 4.3):** subsampling variant of Experience A (4:4:0) -- identical pipeline to `algo/jpeg-baseline`, only the chroma subsampling changes. Compared against `algo/jpeg-baseline` to isolate the effect of subsampling alone.
 
 **Configuration:** standard JPEG, libjpeg IJG v9e, quality 75, default
-quantization tables, 4:2:0 chroma subsampling (IJG defaults — nothing
-overridden).
+quantization tables, 4:4:0 chroma subsampling (`JPEG_SAMPLE_FACTORS = "1x2,1x1,1x1"`).
 
 ## What's fixed by the protocol (do not change)
 
 - Gate thresholds, VARI thresholds, capture resolution: `common/config.py`
-- JPEG quality (75) and subsampling (4:2:0): `common/config.py`
+- JPEG quality (75) and subsampling (4:4:0): `common/config.py`
   (`JPEG_QUALITY`, `JPEG_SAMPLE_FACTORS`)
-- Pipeline order: capture -> gate -> segmentation -> compression -> energy
-  measurement -> node metrics -> transmission (`pipeline.py` / `pipeline_test.py`)
+- Pipeline order: capture -> compression -> energy measurement -> node
+  metrics -> transmission (`pipeline.py` / `pipeline_test.py`) -- no gate,
+  no segmentation on this branch (see `common/vari.py` docstring)
 
 ## What you need to do before running this branch
 
@@ -54,10 +53,10 @@ compression/
 
 ```bash
 cd ~/firmware
-git checkout -b algo/jpeg-baseline
+git checkout -b algo/jpeg-4x4x0
 # copy the contents of this folder to the repo root
 git add .
-git commit -m "algo/jpeg-baseline: JPEG Q75 4:2:0 baseline"
+git commit -m "algo/jpeg-4x4x0: JPEG Q75 4:4:0"
 ```
 
 To switch configurations later, you only ever do:
