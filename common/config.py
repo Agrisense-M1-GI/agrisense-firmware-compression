@@ -20,8 +20,8 @@ LOGS_DIR = os.path.join(NODE_ROOT, "logs")
 RESULTS_DIR = os.path.join(NODE_ROOT, "results")
 
 # Identifies this branch/configuration in logs and result filenames.
-BRANCH_NAME = "algo/jpeg-baseline"
-RESULTS_CSV = os.path.join(RESULTS_DIR, "resultats_jpeg-baseline.csv")
+BRANCH_NAME = "algo/jpeg-4x4x4"
+RESULTS_CSV = os.path.join(RESULTS_DIR, "resultats_jpeg-4x4x4.csv")
 
 # --- Change-detection gate thresholds (Section 4.2, step 2) ------------
 # Ported from the real "garde_fou_energetique.py" v2 implementation:
@@ -83,14 +83,14 @@ LAST_CAPTURE_PATH = os.path.join(NODE_ROOT, "last_capture.png")
 # --- Station link (Section 4.2, step 8) ---------------------------------
 # CALIBRATE: replace with the station's real address on your network.
 STATION_UPLOAD_URL = os.environ.get(
-    "AGRISENSE_STATION_URL", "http://192.168.43.36:8000/upload"
+    "AGRISENSE_STATION_URL", "http://192.168.1.50:8000/upload"
 )
 
 # --- Branch-specific compression parameters (Section 4.3) --------------
-# algo/jpeg-baseline: JPEG standard libjpeg IJG v9e, quality Q75,
-# subsampling 4:2:0 by default.
+# algo/jpeg-4x4x4: identical to algo/jpeg-baseline except for chroma
+# subsampling -- JPEG standard libjpeg IJG v9e, quality Q75, 4:4:4.
 JPEG_QUALITY = 75
-JPEG_SAMPLE_FACTORS = "2x2,1x1,1x1"  # cjpeg -sample argument -> 4:2:0
+JPEG_SAMPLE_FACTORS = "1x1,1x1,1x1"  # cjpeg -sample argument -> 4:4:4
 
 # Path to the compiled cjpeg/djpeg binaries for THIS branch's private copy
 # of jpeg-9e (Section: "une copie de la bibliotheque par branche").
