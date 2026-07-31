@@ -24,7 +24,7 @@ import time
 import uuid
 
 from capture import camera
-from common import config, metrics, energy_uart, transmit
+from common import config, metrics, energy_uart, transmit, system_metrics
 from compression import encode as compression
 
 
@@ -48,7 +48,12 @@ def main():
 
     total_time_ms = (time.time() - total_t0) * 1000.0
 
-    # --- 3. Node metrics ----------------------------------------------
+    # --- 3. System metrics (Section 6.1), read once per image -------------
+    cpu_freq_hz = system_metrics.read_cpu_freq_hz()
+    cpu_temp_c = system_metrics.read_cpu_temp_c()
+    ram_used_mb = system_metrics.read_ram_used_mb()
+
+    # --- 4. Node metrics ----------------------------------------------
     m = metrics.NodeMetrics(
         algorithm=config.BRANCH_NAME,
         image_id=image_id,
@@ -58,16 +63,19 @@ def main():
         capture_time_ms=capture_time_ms,
         compression_time_ms=compression_time_ms,
         total_pipeline_time_ms=total_time_ms,
+        cpu_freq_hz=cpu_freq_hz,
+        cpu_temp_c=cpu_temp_c,
+        ram_used_mb=ram_used_mb,
     )
     m = metrics.finalize(m)
     metrics.append_csv(m)
 
-    # --- 4. Transmission (WiFi) — systematic, no gate on this branch ---
+    # --- 5. Transmission (WiFi) — systematic, no gate on this branch ---
     transmit.send_to_station(image_id, compressed_bytes, m.__dict__)
     print(f"[pipeline] {image_id}: transmitted "
           f"({input_size_bytes} -> {len(compressed_bytes)} bytes)")
 
-    # --- 5. Notify ESP8266 that we're done, then shut down --------------
+    # --- 6. Notify ESP8266 that we're done, then shut down --------------
     _notify_shutdown_ready()
     _maybe_auto_shutdown()
 
