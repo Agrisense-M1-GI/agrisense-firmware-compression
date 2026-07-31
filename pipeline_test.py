@@ -21,7 +21,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-from common import config, metrics, energy_uart, transmit
+from common import config, metrics, energy_uart, transmit, system_metrics
 from compression import encode as compression
 
 
@@ -62,6 +62,10 @@ def main():
 
         total_time_ms = (time.time() - total_t0) * 1000.0
 
+        cpu_freq_hz = system_metrics.read_cpu_freq_hz()
+        cpu_temp_c = system_metrics.read_cpu_temp_c()
+        ram_used_mb = system_metrics.read_ram_used_mb()
+
         m = metrics.NodeMetrics(
             algorithm=config.BRANCH_NAME,
             image_id=image_id,
@@ -71,6 +75,9 @@ def main():
             capture_time_ms=capture_time_ms,
             compression_time_ms=compression_time_ms,
             total_pipeline_time_ms=total_time_ms,
+            cpu_freq_hz=cpu_freq_hz,
+            cpu_temp_c=cpu_temp_c,
+            ram_used_mb=ram_used_mb,
         )
         m = metrics.finalize(m)
         metrics.append_csv(m)
