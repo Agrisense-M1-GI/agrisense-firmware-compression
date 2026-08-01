@@ -20,8 +20,8 @@ LOGS_DIR = os.path.join(NODE_ROOT, "logs")
 RESULTS_DIR = os.path.join(NODE_ROOT, "results")
 
 # Identifies this branch/configuration in logs and result filenames.
-BRANCH_NAME = "algo/jpeg-baseline"
-RESULTS_CSV = os.path.join(RESULTS_DIR, "resultats_jpeg-baseline.csv")
+BRANCH_NAME = "algo/jpeg-qveg-qbg"
+RESULTS_CSV = os.path.join(RESULTS_DIR, "resultats_jpeg-qveg-qbg.csv")
 
 # --- Change-detection gate thresholds (Section 4.2, step 2) ------------
 # Ported from the real "garde_fou_energetique.py" v2 implementation:
@@ -83,18 +83,25 @@ LAST_CAPTURE_PATH = os.path.join(NODE_ROOT, "last_capture.png")
 # --- Station link (Section 4.2, step 8) ---------------------------------
 # CALIBRATE: replace with the station's real address on your network.
 STATION_UPLOAD_URL = os.environ.get(
-    "AGRISENSE_STATION_URL", "http://192.168.0.150:8000/upload"
+    "AGRISENSE_STATION_URL", "http://192.168.1.50:8000/upload"
 )
 
 # --- Branch-specific compression parameters (Section 4.3) --------------
-# algo/jpeg-baseline: JPEG standard libjpeg IJG v9e, quality Q75,
-# subsampling 4:2:0 by default.
-JPEG_QUALITY = 75
-JPEG_SAMPLE_FACTORS = "2x2,1x1,1x1"  # cjpeg -sample argument -> 4:2:0
+# algo/jpeg-qveg-qbg: tiling approach ("Option B") -- image split into
+# vegetation/background 8x8-block regions (common/vari.py's composite
+# mask), each region packed into its own compact JPEG with its own
+# quantization table (luminance only; chroma stays standard).
+# Tables below are PLACEHOLDERS (CALIBRATE): both identical to the
+# standard IJG luminance table, natural/row-major order -- no real
+# Qveg/Qbg differentiation yet, pending the sorted random search
+# (Sampson et al., arXiv:2003.02874).
+QVEG_QBG_BLOCK_SIZE = 8
+QTABLES_DIR = os.path.join(os.path.dirname(__file__), "..", "compression", "qtables")
+QVEG_TABLE_PATH = os.path.join(QTABLES_DIR, "qveg_placeholder.txt")
+QBG_TABLE_PATH = os.path.join(QTABLES_DIR, "qbg_placeholder.txt")
 
-# Path to the compiled cjpeg/djpeg binaries for THIS branch's private copy
-# of jpeg-9e (Section: "une copie de la bibliotheque par branche").
+# Path to the compiled roi_jpeg_codec binary for THIS branch, linked
+# against this branch's own private copy of jpeg-9e (not system libjpeg).
 # Build it once with: compression/lib/build.sh
 JPEG_LIB_DIR = os.path.join(os.path.dirname(__file__), "..", "compression", "lib")
-CJPEG_BIN = os.path.join(JPEG_LIB_DIR, "jpeg-9e", "cjpeg")
-DJPEG_BIN = os.path.join(JPEG_LIB_DIR, "jpeg-9e", "djpeg")
+ROI_JPEG_CODEC_BIN = os.path.join(JPEG_LIB_DIR, "roi_jpeg_codec")
