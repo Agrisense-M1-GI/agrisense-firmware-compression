@@ -83,7 +83,7 @@ LAST_CAPTURE_PATH = os.path.join(NODE_ROOT, "last_capture.png")
 # --- Station link (Section 4.2, step 8) ---------------------------------
 # CALIBRATE: replace with the station's real address on your network.
 STATION_UPLOAD_URL = os.environ.get(
-    "AGRISENSE_STATION_URL", "http://192.168.1.50:8000/upload"
+    "AGRISENSE_STATION_URL", "http://192.168.0.150:8000/upload"
 )
 
 # --- Branch-specific compression parameters (Section 4.3) --------------
