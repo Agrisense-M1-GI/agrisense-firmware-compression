@@ -1,0 +1,6 @@
+cpu_time_ms,3275.410
+memory_kb,41632
+compressed_bytes,94174
+compression_ratio,9.79
+roi_png_bytes,73232
+bg_png_bytes,19686
