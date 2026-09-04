@@ -391,6 +391,14 @@ static int cmd_transcode_decode(const char *in_path, int bw, int n_class_blocks,
     cinfo.input_components = 3;
     cinfo.in_color_space = JCS_RGB;
     jpeg_set_defaults(&cinfo);
+    /* jpeg_write_coefficients() takes the "transcode only" path
+     * internally, which SKIPS jpeg_calc_jpeg_dimensions() and expects
+     * jpeg_width/jpeg_height to already be set (distinct from
+     * image_width/image_height) -- normally done for you by
+     * jpeg_copy_critical_parameters() when transcoding from an existing
+     * decompress struct; we build from scratch, so set them explicitly. */
+    cinfo.jpeg_width = canvas_w;
+    cinfo.jpeg_height = canvas_h;
     jpeg_add_quant_table(&cinfo, 0, (const unsigned int *)qtable, 100, TRUE);
     cinfo.comp_info[0].quant_tbl_no = 0;
     cinfo.comp_info[1].quant_tbl_no = 1;
@@ -409,6 +417,14 @@ static int cmd_transcode_decode(const char *in_path, int bw, int n_class_blocks,
     jvirt_barray_ptr coef_arrays[3];
     for (int ci = 0; ci < 3; ci++) {
         jpeg_component_info *comp = &cinfo.comp_info[ci];
+        /* jpeg_write_coefficients()'s internal master selection reads
+         * these fields directly off cinfo.comp_info[] -- when
+         * constructing coefficients from scratch (not via
+         * jpeg_read_coefficients, which fills them automatically), the
+         * caller must set them explicitly or the image is treated as
+         * empty (JERR_EMPTY_IMAGE). */
+        comp->width_in_blocks = (JDIMENSION)width_in_blocks[ci];
+        comp->height_in_blocks = (JDIMENSION)height_in_blocks[ci];
         coef_arrays[ci] = (cinfo.mem->request_virt_barray)(
             (j_common_ptr)&cinfo, JPOOL_IMAGE, TRUE,
             (JDIMENSION)width_in_blocks[ci], (JDIMENSION)height_in_blocks[ci],
@@ -419,12 +435,16 @@ static int cmd_transcode_decode(const char *in_path, int bw, int n_class_blocks,
 
     /* Now fill the arrays with our decoded coefficients (write access). */
     int y_dc_idx = 0, y_ac_idx = 0;
+    short y_prev_dc = 0;
     for (JDIMENSION by = 0; by < (JDIMENSION)height_in_blocks[0]; by++) {
         JBLOCKARRAY buffer = (*cinfo.mem->access_virt_barray)(
             (j_common_ptr)&cinfo, coef_arrays[0], by, 1, TRUE);
         for (JDIMENSION bx = 0; bx < (JDIMENSION)width_in_blocks[0]; bx++) {
             JCOEFPTR blockptr = buffer[0][bx];
-            blockptr[0] = (JCOEF)y_dc[y_dc_idx++];
+            short dc_diff = (short)y_dc[y_dc_idx++];
+            short dc_val = (short)(y_prev_dc + dc_diff);
+            y_prev_dc = dc_val;
+            blockptr[0] = (JCOEF)dc_val;
             for (int k = 1; k < DCTSIZE2; k++) blockptr[k] = (JCOEF)y_ac[y_ac_idx++];
         }
     }

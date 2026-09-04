@@ -111,3 +111,4 @@ QBG_TABLE_PATH = os.path.join(QTABLES_DIR, "qbg_placeholder.txt")
 # Build it once with: compression/lib/build.sh
 JPEG_LIB_DIR = os.path.join(os.path.dirname(__file__), "..", "compression", "lib")
 ROI_JPEG_CODEC_BIN = os.path.join(JPEG_LIB_DIR, "roi_jpeg_codec")
+RANS_JPEG_CODEC_BIN = os.path.join(JPEG_LIB_DIR, "rans_jpeg_codec")
