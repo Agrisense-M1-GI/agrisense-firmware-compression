@@ -1,78 +1,287 @@
 #!/usr/bin/env python3
 """
-AgriSense - Serveur de réception station laptop
-Gestion du mode maintenance, réception des données de terrain, et
-évaluation automatique du dataset de test (294 images).
+AgriSense - Serveur de réception station laptop  v1.3
+======================================================
+Nouveautés v1.3 — Samples visuels pour publication :
+  - Sauvegarde de reconstructions côté serveur pour un sous-ensemble
+    fixe d'images (samples), utilisables directement dans les articles.
+  - Deux formats produits par image sample :
+      1. PNG individuels  →  data/samples/<image_id>/
+             original.png | wz_oseg.png | adres_q.png | adres_e.png
+             sam_mask.png (ground truth) | otsu_mask.png (encodeur)
+      2. Planche de comparaison  →  data/samples/<image_id>/comparison.png
+             figure 7 colonnes côte à côte, prête à insérer dans LaTeX
+             (long paper) ou rognée à 4 colonnes (short paper).
+  - Sélection du sous-ensemble fixe :
+      • Priorité 1 : data/sample_ids.txt  (un image_id par ligne,
+        éditable manuellement avant le run).
+      • Priorité 2 : sélection automatique de SAMPLE_AUTO_N images
+        réparties uniformément sur l'ordre alphabétique des image_id
+        vus au premier run — liste écrite dans data/sample_ids.txt
+        pour reproductibilité.
+  - Endpoint GET /samples/download  →  ZIP de tout data/samples/.
+  - Endpoint GET /samples/list       →  liste JSON des samples produits.
 
-Nouveau dans cette version : l'endpoint /test/submit/{node_id}/{image_id}
-reçoit l'image originale + les artefacts compressés WZ-OSEG et ADRES
-(profils Q et E), reconstruit chaque variante, calcule PSNR/SSIM/IoU/Dice
-et ajoute une ligne par variante à data/results.csv.
-
-Hypothèses explicites (à vérifier / discuter, pas des faits établis) :
-  - WZ-OSEG est décodé en utilisant l'image originale elle-même comme
-    "side information". C'est un choix assumé et documenté comme un biais
-    dans les limites de l'article (les 294 images ne sont pas des rafales
-    temporellement corrélées) -- le PSNR/SSIM WZ-OSEG mesuré ici est donc
-    une BORNE SUPÉRIEURE, pas une mesure de déploiement réaliste.
-  - Le "masque de référence" pour IoU/Dice est un Otsu recalculé côté
-    serveur sur l'image brute uploadée -- PAS un masque annoté à la main.
-    Ce chiffre mesure donc la FIDÉLITÉ DE TRANSMISSION du masque
-    (subsampling/quantification), pas une exactitude de segmentation par
-    rapport à une vérité terrain humaine.
+Hypothèses inchangées de v1.2 :
+  - WZ-OSEG décodé avec l'image originale comme side information
+    (borne supérieure PSNR/SSIM, biais documenté).
+  - Priorité masque de référence : sam_uploaded > sam_local > otsu_fallback.
+  - Énergie NON rapportée (INA219 saturait à 3.2 A au boot du Pi).
 """
 
 import csv
+import io
 import json
 import shutil
 import sys
 import threading
+import zipfile
 from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 from fastapi import FastAPI, HTTPException, UploadFile, File
-from fastapi.responses import JSONResponse
-from PIL import Image
+from fastapi.responses import JSONResponse, StreamingResponse
+from PIL import Image, ImageDraw, ImageFont
 from pydantic import BaseModel
 from skimage.filters import threshold_otsu
 
 # ---------------------------------------------------------------------------
 # Chemins
 # ---------------------------------------------------------------------------
-BASE_DIR      = Path(__file__).parent
-DATA_DIR      = BASE_DIR / "data"
-MODE_FILE     = DATA_DIR / "mode.json"
-NODES_DIR     = DATA_DIR / "nodes"
-TEST_RUN_DIR  = DATA_DIR / "test_run"
-RESULTS_CSV   = DATA_DIR / "results.csv"
-DECODERS_DIR  = BASE_DIR / "decoders"
+BASE_DIR         = Path(__file__).parent
+DATA_DIR         = BASE_DIR / "data"
+MODE_FILE        = DATA_DIR / "mode.json"
+NODES_DIR        = DATA_DIR / "nodes"
+TEST_RUN_DIR     = DATA_DIR / "test_run"
+RESULTS_CSV      = DATA_DIR / "results.csv"
+DECODERS_DIR     = BASE_DIR / "decoders"
+SAMPLES_DIR      = DATA_DIR / "samples"
+SAMPLE_IDS_FILE  = DATA_DIR / "sample_ids.txt"
+
+SERVER_DATASET_DIR = Path.home() / "DATASET"
+SERVER_MASK_DIR    = SERVER_DATASET_DIR / "mask"
+
+# Nombre d'images choisies automatiquement si sample_ids.txt est absent
+SAMPLE_AUTO_N = 15
 
 DATA_DIR.mkdir(exist_ok=True)
 TEST_RUN_DIR.mkdir(exist_ok=True)
+SAMPLES_DIR.mkdir(exist_ok=True)
 
 sys.path.insert(0, str(DECODERS_DIR))
-import metrics as qmetrics          # noqa: E402  (metrics.py, same folder as main.py)
-import wz_oseg_decode                # noqa: E402  (decoders/wz_oseg_decode.py)
-import adres_decode                  # noqa: E402  (decoders/adres_decode.py)
-import reference_jpeg_decode         # noqa: E402  (decoders/reference_jpeg_decode.py, branch reference/jpeg)
+import metrics as qmetrics      # noqa: E402
+import wz_oseg_decode            # noqa: E402
+import adres_decode              # noqa: E402
 
 # ---------------------------------------------------------------------------
 # App
 # ---------------------------------------------------------------------------
-app = FastAPI(title="AgriSense Server", version="1.1.0")
+app = FastAPI(title="AgriSense Server", version="1.3.0")
 
-_csv_lock = threading.Lock()
+_csv_lock    = threading.Lock()
+_sample_lock = threading.Lock()
+
 _csv_fields = [
     "timestamp", "node_id", "image_id", "algorithm", "profile",
     "psnr_db", "ssim", "mask_iou", "mask_dice",
+    "mask_ref_source",
     "cpu_time_ms", "memory_kb", "compressed_bytes", "compression_ratio",
 ]
 
+# Cache en mémoire des image_id retenus comme samples
+# (chargé au premier accès, mis à jour si sélection auto)
+_sample_ids: set | None = None
+_seen_ids: list = []        # ordre d'apparition pour la sélection auto
+
 
 # ---------------------------------------------------------------------------
-# Utilitaires existants (mode terrain, inchangés)
+# Gestion du sous-ensemble sample
 # ---------------------------------------------------------------------------
+
+def _load_sample_ids() -> set:
+    """
+    Charge sample_ids.txt si présent.
+    Retourne un ensemble vide si le fichier n'existe pas encore
+    (la sélection auto se fera plus tard dans _register_seen_id).
+    """
+    if SAMPLE_IDS_FILE.exists():
+        ids = set()
+        with open(SAMPLE_IDS_FILE) as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    ids.add(line)
+        return ids
+    return set()
+
+
+def _save_sample_ids(ids: set) -> None:
+    with open(SAMPLE_IDS_FILE, "w") as f:
+        f.write("# Sous-ensemble fixe pour figures de publication\n")
+        f.write("# Généré automatiquement — éditable manuellement\n")
+        for id_ in sorted(ids):
+            f.write(f"{id_}\n")
+
+
+def _register_seen_id(image_id: str) -> None:
+    """
+    Enregistre image_id dans _seen_ids.
+    Si sample_ids.txt n'existe pas et qu'on a vu >= SAMPLE_AUTO_N images,
+    déclenche la sélection automatique uniforme et écrit le fichier.
+    """
+    global _sample_ids, _seen_ids
+    with _sample_lock:
+        if image_id not in _seen_ids:
+            _seen_ids.append(image_id)
+
+        # Sélection auto uniquement si le fichier n'existait pas au démarrage
+        if _sample_ids is not None and len(_sample_ids) > 0:
+            return  # liste manuelle déjà chargée
+
+        # Pas encore de liste : on attend d'avoir vu assez d'images
+        # (ou on prend ce qu'on a si on dépasse SAMPLE_AUTO_N)
+        if len(_seen_ids) >= SAMPLE_AUTO_N and not SAMPLE_IDS_FILE.exists():
+            step = len(_seen_ids) / SAMPLE_AUTO_N
+            selected = {
+                _seen_ids[round(i * step)] for i in range(SAMPLE_AUTO_N)
+            }
+            _sample_ids = selected
+            _save_sample_ids(selected)
+            print(f"[Samples] Sélection automatique de {len(selected)} images "
+                  f"→ {SAMPLE_IDS_FILE}")
+
+
+def is_sample(image_id: str) -> bool:
+    """Retourne True si image_id fait partie du sous-ensemble sample."""
+    global _sample_ids
+    if _sample_ids is None:
+        _sample_ids = _load_sample_ids()
+    return image_id in _sample_ids
+
+
+# ---------------------------------------------------------------------------
+# Construction de la planche de comparaison
+# ---------------------------------------------------------------------------
+
+# Colonnes de la planche (ordre = ordre d'affichage)
+_PANEL_COLS = [
+    ("original",  "Original"),
+    ("sam_mask",  "SAM mask"),
+    ("otsu_mask", "Otsu mask"),
+    ("wz_oseg",   "WZ-OSEG"),
+    ("adres_q",   "ADRES-Q"),
+    ("adres_e",   "ADRES-E"),
+]
+
+_LABEL_H   = 22    # pixels réservés pour le label texte sous chaque vignette
+_THUMB_W   = 160   # largeur d'une vignette (hauteur calculée proportionnellement)
+_PAD       = 4     # espacement entre vignettes
+
+
+def _build_comparison(images: dict[str, np.ndarray | None],
+                      thumb_w: int = _THUMB_W) -> Image.Image:
+    """
+    Construit une planche de comparaison horizontale.
+    images : dict col_key → ndarray RGB uint8 ou None (colonne absente).
+    Retourne une image PIL.
+    """
+    # Colonnes présentes uniquement
+    cols = [(k, lbl) for k, lbl in _PANEL_COLS if images.get(k) is not None]
+    if not cols:
+        raise ValueError("Aucune image à assembler")
+
+    # Dimensions uniformes : toutes les vignettes ont la même largeur
+    ref = images[cols[0][0]]
+    h0, w0 = ref.shape[:2]
+    thumb_h = round(thumb_w * h0 / w0)
+
+    panel_w = len(cols) * (thumb_w + _PAD) - _PAD
+    panel_h = thumb_h + _LABEL_H
+    panel = Image.new("RGB", (panel_w, panel_h), (245, 245, 245))
+
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 11)
+    except Exception:
+        font = ImageFont.load_default()
+
+    draw = ImageDraw.Draw(panel)
+
+    for col_idx, (key, label) in enumerate(cols):
+        arr = images[key]
+        # Conversion niveaux de gris → RGB si nécessaire
+        if arr.ndim == 2:
+            arr = np.stack([arr] * 3, axis=-1)
+        thumb = Image.fromarray(arr.astype(np.uint8), "RGB").resize(
+            (thumb_w, thumb_h), Image.LANCZOS)
+
+        x0 = col_idx * (thumb_w + _PAD)
+        panel.paste(thumb, (x0, 0))
+
+        # Label centré sous la vignette
+        bbox = draw.textbbox((0, 0), label, font=font)
+        text_w = bbox[2] - bbox[0]
+        tx = x0 + (thumb_w - text_w) // 2
+        ty = thumb_h + 2
+        draw.text((tx, ty), label, fill=(30, 30, 30), font=font)
+
+    return panel
+
+
+def save_sample(
+    image_id: str,
+    original_rgb: np.ndarray,
+    wz_rgb: np.ndarray | None,
+    adres_q_rgb: np.ndarray | None,
+    adres_e_rgb: np.ndarray | None,
+    sam_mask: np.ndarray | None,
+    otsu_mask: np.ndarray | None,
+) -> None:
+    """
+    Sauvegarde les PNG individuels et la planche de comparaison dans
+    data/samples/<image_id>/.
+    Idempotent : écrase silencieusement si déjà présent.
+    """
+    out_dir = SAMPLES_DIR / image_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    def _save(arr: np.ndarray | None, name: str) -> None:
+        if arr is None:
+            return
+        if arr.ndim == 2:
+            img = Image.fromarray(arr.astype(np.uint8), "L")
+        else:
+            img = Image.fromarray(arr.astype(np.uint8), "RGB")
+        img.save(out_dir / name, "PNG")
+
+    _save(original_rgb,  "original.png")
+    _save(wz_rgb,        "wz_oseg.png")
+    _save(adres_q_rgb,   "adres_q.png")
+    _save(adres_e_rgb,   "adres_e.png")
+    _save(sam_mask,      "sam_mask.png")
+    _save(otsu_mask,     "otsu_mask.png")
+
+    # Planche de comparaison
+    images_dict = {
+        "original":  original_rgb,
+        "sam_mask":  sam_mask,
+        "otsu_mask": otsu_mask,
+        "wz_oseg":   wz_rgb,
+        "adres_q":   adres_q_rgb,
+        "adres_e":   adres_e_rgb,
+    }
+    try:
+        panel = _build_comparison(images_dict)
+        panel.save(out_dir / "comparison.png", "PNG")
+        print(f"[Samples] Planche sauvegardée : {out_dir / 'comparison.png'}")
+    except Exception as exc:
+        print(f"[Samples] Erreur planche {image_id}: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# Utilitaires mode terrain (inchangés)
+# ---------------------------------------------------------------------------
+
 def get_node_dir(node_id: str) -> Path:
     node_dir = NODES_DIR / node_id
     if not node_dir.exists():
@@ -83,7 +292,7 @@ def get_node_dir(node_id: str) -> Path:
 def read_mode() -> str:
     if not MODE_FILE.exists():
         write_mode("NORMAL")
-    with open(MODE_FILE, "r") as f:
+    with open(MODE_FILE) as f:
         return json.load(f)["mode"]
 
 
@@ -93,21 +302,20 @@ def write_mode(mode: str) -> None:
 
 
 class ModeUpdate(BaseModel):
-    mode: str  # "NORMAL" ou "MAINTENANCE"
+    mode: str
 
 
 @app.get("/node/{node_id}/mode")
 def get_mode(node_id: str):
     get_node_dir(node_id)
-    mode = read_mode()
-    return {"node_id": node_id, "mode": mode}
+    return {"node_id": node_id, "mode": read_mode()}
 
 
 @app.put("/node/mode")
 def set_mode(update: ModeUpdate):
     mode = update.mode.upper()
     if mode not in ("NORMAL", "MAINTENANCE"):
-        raise HTTPException(status_code=400, detail="Mode invalide. Valeurs acceptées : NORMAL, MAINTENANCE")
+        raise HTTPException(status_code=400, detail="Mode invalide.")
     write_mode(mode)
     return {"status": "ok", "mode": mode}
 
@@ -117,14 +325,11 @@ async def upload_image(node_id: str, file: UploadFile = File(...)):
     node_dir = get_node_dir(node_id)
     images_dir = node_dir / "images"
     images_dir.mkdir(exist_ok=True)
-
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     suffix = Path(file.filename).suffix if file.filename else ".jpg"
     dest = images_dir / f"{timestamp}{suffix}"
-
     with open(dest, "wb") as f:
         shutil.copyfileobj(file.file, f)
-
     return {"status": "ok", "saved_as": str(dest.relative_to(BASE_DIR))}
 
 
@@ -133,13 +338,10 @@ async def upload_metrics(node_id: str, file: UploadFile = File(...)):
     node_dir = get_node_dir(node_id)
     metrics_dir = node_dir / "metrics"
     metrics_dir.mkdir(exist_ok=True)
-
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     dest = metrics_dir / f"{timestamp}.json"
-
     with open(dest, "wb") as f:
         shutil.copyfileobj(file.file, f)
-
     return {"status": "ok", "saved_as": str(dest.relative_to(BASE_DIR))}
 
 
@@ -150,13 +352,75 @@ def status():
     return {"server": "AgriSense", "mode": mode, "nodes": nodes}
 
 
+@app.get("/test/done_ids")
+def get_done_ids():
+    done = set()
+    if RESULTS_CSV.exists():
+        with open(RESULTS_CSV, newline="") as f:
+            for row in csv.DictReader(f):
+                done.add(row["image_id"])
+    return {"done_ids": list(done)}
+
+
 # ---------------------------------------------------------------------------
-# NEW: évaluation automatique du dataset de test
+# Endpoints samples
 # ---------------------------------------------------------------------------
+
+@app.get("/samples/list")
+def samples_list():
+    """Liste les image_id pour lesquels un dossier sample existe."""
+    if not SAMPLES_DIR.exists():
+        return {"samples": []}
+    entries = []
+    for d in sorted(SAMPLES_DIR.iterdir()):
+        if d.is_dir():
+            files = [p.name for p in sorted(d.iterdir()) if p.is_file()]
+            entries.append({"image_id": d.name, "files": files})
+    return {"count": len(entries), "samples": entries}
+
+
+@app.get("/samples/download")
+def samples_download():
+    """
+    Retourne un ZIP de data/samples/ en streaming.
+    Pratique pour récupérer toutes les planches d'un coup :
+        curl http://server:8000/samples/download -o samples.zip
+    """
+    if not SAMPLES_DIR.exists() or not any(SAMPLES_DIR.iterdir()):
+        raise HTTPException(status_code=404, detail="Aucun sample disponible.")
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for path in sorted(SAMPLES_DIR.rglob("*")):
+            if path.is_file():
+                zf.write(path, path.relative_to(SAMPLES_DIR.parent))
+    buf.seek(0)
+
+    return StreamingResponse(
+        buf,
+        media_type="application/zip",
+        headers={"Content-Disposition": "attachment; filename=agrisense_samples.zip"},
+    )
+
+
+@app.get("/samples/ids")
+def samples_ids():
+    """Retourne le contenu de sample_ids.txt (liste manuelle ou auto-générée)."""
+    ids = _load_sample_ids()
+    return {
+        "source": "manual" if SAMPLE_IDS_FILE.exists() else "not_generated_yet",
+        "count": len(ids),
+        "sample_ids": sorted(ids),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Utilitaires évaluation
+# ---------------------------------------------------------------------------
+
 def parse_metrics_txt(path: Path) -> dict:
-    """node_metrics.txt is a simple 'key,value' CSV written by the C encoders."""
     values = {}
-    with open(path, "r") as f:
+    with open(path) as f:
         for line in f:
             line = line.strip()
             if not line or "," not in line:
@@ -169,18 +433,45 @@ def parse_metrics_txt(path: Path) -> dict:
     return values
 
 
-def reference_otsu_mask(gray_array: np.ndarray) -> np.ndarray:
-    """Same 'gray > threshold' convention as the C encoders' otsu_threshold()."""
-    thresh = threshold_otsu(gray_array)
-    return (gray_array > thresh).astype(np.uint8) * 255
+def find_server_sam_mask(image_id: str) -> Path | None:
+    if not SERVER_MASK_DIR.is_dir():
+        return None
+    for p in [SERVER_MASK_DIR / f"{image_id}_mask.png",
+              SERVER_MASK_DIR / f"{image_id}.png"]:
+        if p.exists():
+            return p
+    return None
+
+
+def load_reference_mask(
+    image_id: str,
+    uploaded_sam_path: Path | None,
+    original_gray: np.ndarray,
+) -> tuple[np.ndarray, str]:
+    """
+    Priorité : sam_uploaded > sam_local > otsu_fallback.
+    Retourne (masque uint8 0/255, source_string).
+    """
+    if uploaded_sam_path is not None and uploaded_sam_path.exists():
+        m = np.array(Image.open(uploaded_sam_path).convert("L"))
+        return (m > 127).astype(np.uint8) * 255, "sam_uploaded"
+
+    local = find_server_sam_mask(image_id)
+    if local is not None:
+        m = np.array(Image.open(local).convert("L"))
+        return (m > 127).astype(np.uint8) * 255, "sam_local"
+
+    thresh = threshold_otsu(original_gray)
+    print(f"  [Avertissement] {image_id} : aucun masque SAM, fallback Otsu.")
+    return (original_gray > thresh).astype(np.uint8) * 255, "otsu_fallback"
 
 
 def append_result_row(row: dict) -> None:
     with _csv_lock:
-        file_exists = RESULTS_CSV.exists()
+        exists = RESULTS_CSV.exists()
         with open(RESULTS_CSV, "a", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=_csv_fields)
-            if not file_exists:
+            if not exists:
                 writer.writeheader()
             writer.writerow(row)
 
@@ -191,275 +482,529 @@ async def save_upload(upload: UploadFile, dest: Path) -> None:
         shutil.copyfileobj(upload.file, f)
 
 
+# ---------------------------------------------------------------------------
+# Endpoint WZ-OSEG
+# ---------------------------------------------------------------------------
+
 @app.post("/test/submit/wz-oseg/{node_id}/{image_id}")
 async def test_submit_wzoseg(
     node_id: str,
     image_id: str,
-    original: UploadFile = File(...),
+    original:      UploadFile = File(...),
     wz_compressed: UploadFile = File(...),
-    wz_otsu_mask: UploadFile = File(...),
-    wz_metrics: UploadFile = File(...),
+    wz_otsu_mask:  UploadFile = File(...),
+    wz_metrics:    UploadFile = File(...),
+    sam_mask:      UploadFile = File(None),
 ):
-    """Independent endpoint for the algo/wz-oseg branch's pipeline_test.py.
-    No dependency on ADRES artifacts -- this branch's test run is self-contained."""
     run_dir = TEST_RUN_DIR / "wz-oseg" / node_id / image_id
     run_dir.mkdir(parents=True, exist_ok=True)
 
     paths = {
-        "original": run_dir / "original.ppm",
+        "original":      run_dir / "original.png",
         "wz_compressed": run_dir / "wz_compressed.p1",
-        "wz_otsu_mask": run_dir / "wz_otsu_mask.ppm",
-        "wz_metrics": run_dir / "wz_metrics.txt",
+        "wz_otsu_mask":  run_dir / "wz_otsu_mask.png",
+        "wz_metrics":    run_dir / "wz_metrics.txt",
+        "sam_mask":      run_dir / "sam_mask.png",
     }
-    for key, upload in {
-        "original": original, "wz_compressed": wz_compressed,
-        "wz_otsu_mask": wz_otsu_mask, "wz_metrics": wz_metrics,
-    }.items():
+    for key, upload in [
+        ("original", original), ("wz_compressed", wz_compressed),
+        ("wz_otsu_mask", wz_otsu_mask), ("wz_metrics", wz_metrics),
+    ]:
         await save_upload(upload, paths[key])
 
-    try:
-        original_img = Image.open(paths["original"]).convert("RGB")
-        original_rgb = np.array(original_img)
-        ref_mask = reference_otsu_mask(np.array(original_img.convert("L")))
-        timestamp = datetime.now().isoformat()
+    uploaded_sam_path = None
+    if sam_mask is not None:
+        await save_upload(sam_mask, paths["sam_mask"])
+        uploaded_sam_path = paths["sam_mask"]
 
-        # NOTE: side info = original image itself (documented bias, see module docstring).
+    # Enregistrement pour sélection auto si nécessaire
+    _register_seen_id(image_id)
+
+    try:
+        original_img  = Image.open(paths["original"]).convert("RGB")
+        original_rgb  = np.array(original_img)
+        original_gray = np.array(original_img.convert("L"))
+        timestamp     = datetime.now().isoformat()
+
+        ref_mask, mask_ref_source = load_reference_mask(
+            image_id, uploaded_sam_path, original_gray)
+
+        wz_rgb = None
+        otsu_mask_arr = None
         try:
-            otsu_data, hue_data, dct_coeffs, params = wz_oseg_decode.read_compressed(paths["wz_compressed"])
+            otsu_data, hue_data, dct_coeffs, params = wz_oseg_decode.read_compressed(
+                paths["wz_compressed"])
             width, height, bw, bh, coeff_count = params
-            side_gray = (0.299 * original_rgb[:, :, 0] + 0.587 * original_rgb[:, :, 1] +
+            side_gray = (0.299 * original_rgb[:, :, 0] +
+                         0.587 * original_rgb[:, :, 1] +
                          0.114 * original_rgb[:, :, 2]).astype(np.uint8)
-            y_rec = wz_oseg_decode.reconstruct_from_dct_sparse(dct_coeffs, width, height, bw, bh, side_gray)
+            y_rec  = wz_oseg_decode.reconstruct_from_dct_sparse(
+                dct_coeffs, width, height, bw, bh, side_gray)
             wz_rgb = wz_oseg_decode.gray_to_rgb(y_rec)
-            Image.fromarray(wz_rgb, "RGB").save(run_dir / "reconstructed_wz.png")
+
+            otsu_mask_arr = np.array(
+                Image.open(paths["wz_otsu_mask"]).convert("L"))
 
             wz_metrics_vals = parse_metrics_txt(paths["wz_metrics"])
-            wz_mask = np.array(Image.open(paths["wz_otsu_mask"]).convert("L"))
-            iou, dice = qmetrics.compute_iou_dice(ref_mask, wz_mask)
+            iou, dice = qmetrics.compute_iou_dice(ref_mask, otsu_mask_arr)
 
             row = {
                 "timestamp": timestamp, "node_id": node_id, "image_id": image_id,
                 "algorithm": "WZ-OSEG", "profile": "-",
-                "psnr_db": round(qmetrics.compute_psnr(original_rgb, wz_rgb), 3),
-                "ssim": round(qmetrics.compute_ssim(original_rgb, wz_rgb), 4),
+                "psnr_db":  round(qmetrics.compute_psnr(original_rgb, wz_rgb), 3),
+                "ssim":     round(qmetrics.compute_ssim(original_rgb, wz_rgb), 4),
                 "mask_iou": round(iou, 4), "mask_dice": round(dice, 4),
-                "cpu_time_ms": wz_metrics_vals.get("cpu_time_ms"),
-                "memory_kb": wz_metrics_vals.get("memory_kb"),
-                "compressed_bytes": wz_metrics_vals.get("compressed_bytes"),
+                "mask_ref_source": mask_ref_source,
+                "cpu_time_ms":       wz_metrics_vals.get("cpu_time_ms"),
+                "memory_kb":         wz_metrics_vals.get("memory_kb"),
+                "compressed_bytes":  wz_metrics_vals.get("compressed_bytes"),
                 "compression_ratio": wz_metrics_vals.get("compression_ratio"),
             }
         except Exception as exc:
             row = {
                 "timestamp": timestamp, "node_id": node_id, "image_id": image_id,
                 "algorithm": "WZ-OSEG", "profile": "ERROR",
-                "psnr_db": None, "ssim": None, "mask_iou": None, "mask_dice": None,
-                "cpu_time_ms": None, "memory_kb": None, "compressed_bytes": None,
-                "compression_ratio": None,
+                "psnr_db": None, "ssim": None,
+                "mask_iou": None, "mask_dice": None,
+                "mask_ref_source": mask_ref_source,
+                "cpu_time_ms": None, "memory_kb": None,
+                "compressed_bytes": None, "compression_ratio": None,
             }
             print(f"[WZ-OSEG] Erreur reconstruction {image_id}: {exc}")
 
         append_result_row(row)
-        return JSONResponse({"status": "ok", "image_id": image_id, "rows_appended": 1})
+
+        # --- Sample visuel (WZ-OSEG seul ne produit pas ADRES : on attend
+        #     l'endpoint ADRES pour la planche complète).
+        #     On sauvegarde ici uniquement original + wz_oseg + masques,
+        #     la planche sera complétée/écrasée par l'endpoint ADRES si
+        #     les deux branches tournent sur le même image_id. ---
+        if is_sample(image_id) and wz_rgb is not None:
+            sam_arr = None
+            if uploaded_sam_path and uploaded_sam_path.exists():
+                sam_arr = np.array(Image.open(uploaded_sam_path).convert("L"))
+            elif (local := find_server_sam_mask(image_id)):
+                sam_arr = np.array(Image.open(local).convert("L"))
+
+            save_sample(
+                image_id,
+                original_rgb=original_rgb,
+                wz_rgb=wz_rgb,
+                adres_q_rgb=None,
+                adres_e_rgb=None,
+                sam_mask=sam_arr,
+                otsu_mask=otsu_mask_arr,
+            )
+
+        return JSONResponse({
+            "status": "ok", "image_id": image_id, "rows_appended": 1,
+            "mask_ref_source": mask_ref_source,
+            "sample_saved": is_sample(image_id) and wz_rgb is not None,
+        })
 
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Erreur traitement {image_id}: {exc}")
+        raise HTTPException(status_code=500,
+                            detail=f"Erreur traitement {image_id}: {exc}")
 
+
+# ---------------------------------------------------------------------------
+# Endpoint ADRES
+# ---------------------------------------------------------------------------
 
 @app.post("/test/submit/adres/{node_id}/{image_id}")
 async def test_submit_adres(
     node_id: str,
     image_id: str,
-    original: UploadFile = File(...),
+    original:           UploadFile = File(...),
     adres_q_compressed: UploadFile = File(...),
-    adres_q_roi_mask: UploadFile = File(...),
-    adres_q_metrics: UploadFile = File(...),
+    adres_q_roi_mask:   UploadFile = File(...),
+    adres_q_metrics:    UploadFile = File(...),
     adres_e_compressed: UploadFile = File(...),
-    adres_e_roi_mask: UploadFile = File(...),
-    adres_e_metrics: UploadFile = File(...),
+    adres_e_roi_mask:   UploadFile = File(...),
+    adres_e_metrics:    UploadFile = File(...),
+    sam_mask:           UploadFile = File(None),
 ):
-    """Independent endpoint for the algo/adres branch's pipeline_test.py.
-    No dependency on WZ-OSEG artifacts -- this branch's test run is self-contained."""
     run_dir = TEST_RUN_DIR / "adres" / node_id / image_id
     run_dir.mkdir(parents=True, exist_ok=True)
 
     paths = {
-        "original": run_dir / "original.ppm",
+        "original":           run_dir / "original.png",
         "adres_q_compressed": run_dir / "adres_q_compressed.p2",
-        "adres_q_roi_mask": run_dir / "adres_q_roi_mask.ppm",
-        "adres_q_metrics": run_dir / "adres_q_metrics.txt",
+        "adres_q_roi_mask":   run_dir / "adres_q_roi_mask.png",
+        "adres_q_metrics":    run_dir / "adres_q_metrics.txt",
         "adres_e_compressed": run_dir / "adres_e_compressed.p2",
-        "adres_e_roi_mask": run_dir / "adres_e_roi_mask.ppm",
-        "adres_e_metrics": run_dir / "adres_e_metrics.txt",
+        "adres_e_roi_mask":   run_dir / "adres_e_roi_mask.png",
+        "adres_e_metrics":    run_dir / "adres_e_metrics.txt",
+        "sam_mask":           run_dir / "sam_mask.png",
     }
-    for key, upload in {
-        "original": original,
-        "adres_q_compressed": adres_q_compressed, "adres_q_roi_mask": adres_q_roi_mask,
-        "adres_q_metrics": adres_q_metrics, "adres_e_compressed": adres_e_compressed,
-        "adres_e_roi_mask": adres_e_roi_mask, "adres_e_metrics": adres_e_metrics,
-    }.items():
+    for key, upload in [
+        ("original", original),
+        ("adres_q_compressed", adres_q_compressed),
+        ("adres_q_roi_mask",   adres_q_roi_mask),
+        ("adres_q_metrics",    adres_q_metrics),
+        ("adres_e_compressed", adres_e_compressed),
+        ("adres_e_roi_mask",   adres_e_roi_mask),
+        ("adres_e_metrics",    adres_e_metrics),
+    ]:
         await save_upload(upload, paths[key])
 
-    try:
-        original_img = Image.open(paths["original"]).convert("RGB")
-        original_rgb = np.array(original_img)
-        ref_mask = reference_otsu_mask(np.array(original_img.convert("L")))
-        timestamp = datetime.now().isoformat()
+    uploaded_sam_path = None
+    if sam_mask is not None:
+        await save_upload(sam_mask, paths["sam_mask"])
+        uploaded_sam_path = paths["sam_mask"]
 
-        results = []
+    _register_seen_id(image_id)
+
+    try:
+        original_img  = Image.open(paths["original"]).convert("RGB")
+        original_rgb  = np.array(original_img)
+        original_gray = np.array(original_img.convert("L"))
+        timestamp     = datetime.now().isoformat()
+
+        ref_mask, mask_ref_source = load_reference_mask(
+            image_id, uploaded_sam_path, original_gray)
+
+        results       = []
+        adres_q_rgb   = None
+        adres_e_rgb   = None
+        otsu_mask_arr = None
+
         for profile, comp_key, mask_key, metrics_key in [
             ("Q", "adres_q_compressed", "adres_q_roi_mask", "adres_q_metrics"),
             ("E", "adres_e_compressed", "adres_e_roi_mask", "adres_e_metrics"),
         ]:
             try:
-                roi_mask, roi_png_bytes, bg_png_bytes, params = adres_decode.read_compressed(paths[comp_key])
-                adres_rgb = adres_decode.reconstruct_image(roi_mask, roi_png_bytes, bg_png_bytes, params)
-                Image.fromarray(adres_rgb, "RGB").save(run_dir / f"reconstructed_adres_{profile}.png")
+                roi_mask_blk, roi_png_bytes, bg_png_bytes, params = \
+                    adres_decode.read_compressed(paths[comp_key])
+                adres_rgb = adres_decode.reconstruct_image(
+                    roi_mask_blk, roi_png_bytes, bg_png_bytes, params)
+
+                if profile == "Q":
+                    adres_q_rgb = adres_rgb
+                    # Masque Otsu de l'encodeur (même pour Q et E,
+                    # on prend Q comme référence visuelle)
+                    otsu_mask_arr = np.array(
+                        Image.open(paths[mask_key]).convert("L"))
+                else:
+                    adres_e_rgb = adres_rgb
 
                 adres_metrics_vals = parse_metrics_txt(paths[metrics_key])
                 adres_mask = np.array(Image.open(paths[mask_key]).convert("L"))
-                iou, dice = qmetrics.compute_iou_dice(ref_mask, adres_mask)
+                iou, dice  = qmetrics.compute_iou_dice(ref_mask, adres_mask)
 
                 results.append({
                     "timestamp": timestamp, "node_id": node_id, "image_id": image_id,
                     "algorithm": "ADRES", "profile": profile,
-                    "psnr_db": round(qmetrics.compute_psnr(original_rgb, adres_rgb), 3),
-                    "ssim": round(qmetrics.compute_ssim(original_rgb, adres_rgb), 4),
+                    "psnr_db":  round(qmetrics.compute_psnr(original_rgb, adres_rgb), 3),
+                    "ssim":     round(qmetrics.compute_ssim(original_rgb, adres_rgb), 4),
                     "mask_iou": round(iou, 4), "mask_dice": round(dice, 4),
-                    "cpu_time_ms": adres_metrics_vals.get("cpu_time_ms"),
-                    "memory_kb": adres_metrics_vals.get("memory_kb"),
-                    "compressed_bytes": adres_metrics_vals.get("compressed_bytes"),
+                    "mask_ref_source": mask_ref_source,
+                    "cpu_time_ms":       adres_metrics_vals.get("cpu_time_ms"),
+                    "memory_kb":         adres_metrics_vals.get("memory_kb"),
+                    "compressed_bytes":  adres_metrics_vals.get("compressed_bytes"),
                     "compression_ratio": adres_metrics_vals.get("compression_ratio"),
                 })
             except Exception as exc:
                 results.append({
                     "timestamp": timestamp, "node_id": node_id, "image_id": image_id,
                     "algorithm": "ADRES", "profile": f"{profile}-ERROR",
-                    "psnr_db": None, "ssim": None, "mask_iou": None, "mask_dice": None,
-                    "cpu_time_ms": None, "memory_kb": None, "compressed_bytes": None,
-                    "compression_ratio": None,
+                    "psnr_db": None, "ssim": None,
+                    "mask_iou": None, "mask_dice": None,
+                    "mask_ref_source": mask_ref_source,
+                    "cpu_time_ms": None, "memory_kb": None,
+                    "compressed_bytes": None, "compression_ratio": None,
                 })
                 print(f"[ADRES-{profile}] Erreur reconstruction {image_id}: {exc}")
 
         for row in results:
             append_result_row(row)
 
-        return JSONResponse({"status": "ok", "image_id": image_id, "rows_appended": len(results)})
+        # --- Sample visuel complet (ADRES produit les deux profils + original) ---
+        sample_saved = False
+        if is_sample(image_id):
+            sam_arr = None
+            if uploaded_sam_path and uploaded_sam_path.exists():
+                sam_arr = np.array(Image.open(uploaded_sam_path).convert("L"))
+            elif (local := find_server_sam_mask(image_id)):
+                sam_arr = np.array(Image.open(local).convert("L"))
+
+            # Récupère wz_oseg.png s'il existe déjà (endpoint WZ-OSEG traité avant)
+            wz_rgb = None
+            wz_path = SAMPLES_DIR / image_id / "wz_oseg.png"
+            if wz_path.exists():
+                wz_rgb = np.array(Image.open(wz_path).convert("RGB"))
+
+            save_sample(
+                image_id,
+                original_rgb=original_rgb,
+                wz_rgb=wz_rgb,
+                adres_q_rgb=adres_q_rgb,
+                adres_e_rgb=adres_e_rgb,
+                sam_mask=sam_arr,
+                otsu_mask=otsu_mask_arr,
+            )
+            sample_saved = True
+
+        return JSONResponse({
+            "status": "ok", "image_id": image_id,
+            "rows_appended": len(results),
+            "mask_ref_source": mask_ref_source,
+            "sample_saved": sample_saved,
+        })
 
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Erreur traitement {image_id}: {exc}")
+        raise HTTPException(status_code=500,
+                            detail=f"Erreur traitement {image_id}: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# Endpoint REFERENCE (JPEG + JPEG2000-ROI 2-flux)
+# ---------------------------------------------------------------------------
+
+# Import du décodeur reference (même dossier que main.py ou decoders/)
+try:
+    import reference_jpeg_decode as ref_decode  # noqa: E402
+except ImportError:
+    import importlib.util, pathlib as _pl
+    _spec = importlib.util.spec_from_file_location(
+        "reference_jpeg_decode",
+        str(DECODERS_DIR / "reference_jpeg_decode.py"))
+    ref_decode = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(ref_decode)
 
 
 @app.post("/test/submit/reference/{node_id}/{image_id}")
 async def test_submit_reference(
     node_id: str,
     image_id: str,
-    original: UploadFile = File(...),
-    jpeg_compressed: UploadFile = File(...),
-    jpeg_metrics: UploadFile = File(...),
+    original:          UploadFile = File(...),
+    jpeg_compressed:   UploadFile = File(...),
+    jpeg_metrics:      UploadFile = File(...),
     jp2roi_compressed: UploadFile = File(...),
-    jp2roi_roi_mask: UploadFile = File(...),
-    jp2roi_metrics: UploadFile = File(...),
+    jp2roi_roi_mask:   UploadFile = File(...),
+    jp2roi_metrics:    UploadFile = File(...),
+    sam_mask:          UploadFile = File(None),   # optionnel
 ):
-    """Independent endpoint for the branch reference/jpeg's pipeline_test.py.
-    Two methods, both decoded here:
-      - "JPEG": plain Pillow-encoded JPEG, decoded directly by Pillow.
-      - "JPEG2000-ROI-2stream": OpenJPEG dual-stream, region-differentiated
-        encoding (NOT the codestream-native Annex H ROI feature -- see
-        reference_jpeg_decode.py / jpeg2000_roi_test.py docstrings for why).
-    Naming is deliberately explicit ("2stream") so results.csv never implies
-    a native-ROI JPEG2000 measurement that wasn't actually performed."""
+    """
+    Endpoint pour la branche reference/jpeg.
+    Reçoit les artefacts JPEG et JPEG2000-ROI, reconstruit, calcule
+    PSNR/SSIM/IoU/Dice et ajoute 2 lignes à results.csv.
+    Le masque SAM uploadé sert de ground truth pour IoU/Dice
+    (priorité sam_uploaded > sam_local > otsu_fallback).
+    """
     run_dir = TEST_RUN_DIR / "reference" / node_id / image_id
     run_dir.mkdir(parents=True, exist_ok=True)
 
     paths = {
-        "original": run_dir / "original.ppm",
-        "jpeg_compressed": run_dir / "jpeg_compressed.jpg",
-        "jpeg_metrics": run_dir / "jpeg_metrics.txt",
-        "jp2roi_compressed": run_dir / "jp2roi_compressed.jp2roi",
-        "jp2roi_roi_mask": run_dir / "jp2roi_roi_mask.ppm",
-        "jp2roi_metrics": run_dir / "jp2roi_metrics.txt",
+        "original":          run_dir / "original.png",
+        "jpeg_compressed":   run_dir / "compressed.jpg",
+        "jpeg_metrics":      run_dir / "jpeg_metrics.txt",
+        "jp2roi_compressed": run_dir / "compressed.jp2roi",
+        "jp2roi_roi_mask":   run_dir / "jp2roi_roi_mask.png",
+        "jp2roi_metrics":    run_dir / "jp2roi_metrics.txt",
+        "sam_mask":          run_dir / "sam_mask.png",
     }
-    for key, upload in {
-        "original": original,
-        "jpeg_compressed": jpeg_compressed, "jpeg_metrics": jpeg_metrics,
-        "jp2roi_compressed": jp2roi_compressed, "jp2roi_roi_mask": jp2roi_roi_mask,
-        "jp2roi_metrics": jp2roi_metrics,
-    }.items():
+    for key, upload in [
+        ("original",          original),
+        ("jpeg_compressed",   jpeg_compressed),
+        ("jpeg_metrics",      jpeg_metrics),
+        ("jp2roi_compressed", jp2roi_compressed),
+        ("jp2roi_roi_mask",   jp2roi_roi_mask),
+        ("jp2roi_metrics",    jp2roi_metrics),
+    ]:
         await save_upload(upload, paths[key])
 
+    uploaded_sam_path = None
+    if sam_mask is not None:
+        await save_upload(sam_mask, paths["sam_mask"])
+        uploaded_sam_path = paths["sam_mask"]
+
+    _register_seen_id(image_id)
+
     try:
-        original_img = Image.open(paths["original"]).convert("RGB")
-        original_rgb = np.array(original_img)
-        ref_mask = reference_otsu_mask(np.array(original_img.convert("L")))
-        timestamp = datetime.now().isoformat()
+        original_img  = Image.open(paths["original"]).convert("RGB")
+        original_rgb  = np.array(original_img)
+        original_gray = np.array(original_img.convert("L"))
+        timestamp     = datetime.now().isoformat()
 
-        results = []
+        ref_mask, mask_ref_source = load_reference_mask(
+            image_id, uploaded_sam_path, original_gray)
 
-        # --- JPEG (plain, Pillow) ---------------------------------------
+        results         = []
+        jpeg_rgb        = None
+        jp2roi_rgb      = None
+        jp2roi_mask_arr = None
+
+        # ---- JPEG ----
         try:
-            jpeg_rgb = reference_jpeg_decode.decode_jpeg(paths["jpeg_compressed"])
-            jpeg_metrics_vals = parse_metrics_txt(paths["jpeg_metrics"])
-            Image.fromarray(jpeg_rgb, "RGB").save(run_dir / "reconstructed_jpeg.png")
-
+            jpeg_rgb        = ref_decode.decode_jpeg(paths["jpeg_compressed"])
+            jpeg_metrics_v  = parse_metrics_txt(paths["jpeg_metrics"])
+            # JPEG n'a pas de masque ROI transmis — IoU/Dice non applicable,
+            # on rapporte None pour ne pas induire en erreur.
             results.append({
                 "timestamp": timestamp, "node_id": node_id, "image_id": image_id,
                 "algorithm": "JPEG", "profile": "-",
-                "psnr_db": round(qmetrics.compute_psnr(original_rgb, jpeg_rgb), 3),
-                "ssim": round(qmetrics.compute_ssim(original_rgb, jpeg_rgb), 4),
-                "mask_iou": None, "mask_dice": None,  # JPEG has no ROI mask
-                "cpu_time_ms": jpeg_metrics_vals.get("cpu_time_ms"),
-                "memory_kb": jpeg_metrics_vals.get("memory_kb"),
-                "compressed_bytes": jpeg_metrics_vals.get("compressed_bytes"),
-                "compression_ratio": jpeg_metrics_vals.get("compression_ratio"),
+                "psnr_db":  round(qmetrics.compute_psnr(original_rgb, jpeg_rgb), 3),
+                "ssim":     round(qmetrics.compute_ssim(original_rgb, jpeg_rgb), 4),
+                "mask_iou": None, "mask_dice": None,
+                "mask_ref_source": "n/a",
+                "cpu_time_ms":       jpeg_metrics_v.get("cpu_time_ms"),
+                "memory_kb":         jpeg_metrics_v.get("memory_kb"),
+                "compressed_bytes":  jpeg_metrics_v.get("compressed_bytes"),
+                "compression_ratio": jpeg_metrics_v.get("compression_ratio"),
             })
         except Exception as exc:
             results.append({
                 "timestamp": timestamp, "node_id": node_id, "image_id": image_id,
                 "algorithm": "JPEG", "profile": "ERROR",
-                "psnr_db": None, "ssim": None, "mask_iou": None, "mask_dice": None,
-                "cpu_time_ms": None, "memory_kb": None, "compressed_bytes": None,
-                "compression_ratio": None,
+                "psnr_db": None, "ssim": None,
+                "mask_iou": None, "mask_dice": None,
+                "mask_ref_source": "n/a",
+                "cpu_time_ms": None, "memory_kb": None,
+                "compressed_bytes": None, "compression_ratio": None,
             })
             print(f"[JPEG] Erreur reconstruction {image_id}: {exc}")
 
-        # --- JPEG2000-ROI-2stream ----------------------------------------
+        # ---- JPEG2000-ROI ----
         try:
-            jp2roi_rgb, jp2roi_pixel_mask = reference_jpeg_decode.reconstruct_jpeg2000_roi(
-                paths["jp2roi_compressed"]
-            )
-            Image.fromarray(jp2roi_rgb, "RGB").save(run_dir / "reconstructed_jp2roi.png")
+            jp2roi_rgb, jp2roi_mask_arr = ref_decode.reconstruct_jpeg2000_roi(
+                paths["jp2roi_compressed"])
 
-            jp2roi_metrics_vals = parse_metrics_txt(paths["jp2roi_metrics"])
-            iou, dice = qmetrics.compute_iou_dice(ref_mask, jp2roi_pixel_mask)
+            # IoU/Dice : masque transmis (jp2roi_mask_arr) vs ground truth SAM
+            iou, dice = qmetrics.compute_iou_dice(ref_mask, jp2roi_mask_arr)
 
+            jp2roi_metrics_v = parse_metrics_txt(paths["jp2roi_metrics"])
             results.append({
                 "timestamp": timestamp, "node_id": node_id, "image_id": image_id,
-                "algorithm": "JPEG2000-ROI-2stream", "profile": "-",
-                "psnr_db": round(qmetrics.compute_psnr(original_rgb, jp2roi_rgb), 3),
-                "ssim": round(qmetrics.compute_ssim(original_rgb, jp2roi_rgb), 4),
+                "algorithm": "JPEG2000-ROI", "profile": "-",
+                "psnr_db":  round(qmetrics.compute_psnr(original_rgb, jp2roi_rgb), 3),
+                "ssim":     round(qmetrics.compute_ssim(original_rgb, jp2roi_rgb), 4),
                 "mask_iou": round(iou, 4), "mask_dice": round(dice, 4),
-                "cpu_time_ms": jp2roi_metrics_vals.get("cpu_time_ms"),
-                "memory_kb": jp2roi_metrics_vals.get("memory_kb"),
-                "compressed_bytes": jp2roi_metrics_vals.get("compressed_bytes"),
-                "compression_ratio": jp2roi_metrics_vals.get("compression_ratio"),
+                "mask_ref_source": mask_ref_source,
+                "cpu_time_ms":       jp2roi_metrics_v.get("cpu_time_ms"),
+                "memory_kb":         jp2roi_metrics_v.get("memory_kb"),
+                "compressed_bytes":  jp2roi_metrics_v.get("compressed_bytes"),
+                "compression_ratio": jp2roi_metrics_v.get("compression_ratio"),
             })
         except Exception as exc:
             results.append({
                 "timestamp": timestamp, "node_id": node_id, "image_id": image_id,
-                "algorithm": "JPEG2000-ROI-2stream", "profile": "ERROR",
-                "psnr_db": None, "ssim": None, "mask_iou": None, "mask_dice": None,
-                "cpu_time_ms": None, "memory_kb": None, "compressed_bytes": None,
-                "compression_ratio": None,
+                "algorithm": "JPEG2000-ROI", "profile": "ERROR",
+                "psnr_db": None, "ssim": None,
+                "mask_iou": None, "mask_dice": None,
+                "mask_ref_source": mask_ref_source,
+                "cpu_time_ms": None, "memory_kb": None,
+                "compressed_bytes": None, "compression_ratio": None,
             })
-            print(f"[JPEG2000-ROI-2stream] Erreur reconstruction {image_id}: {exc}")
+            print(f"[JPEG2000-ROI] Erreur reconstruction {image_id}: {exc}")
 
         for row in results:
             append_result_row(row)
 
-        return JSONResponse({"status": "ok", "image_id": image_id, "rows_appended": len(results)})
+        # ---- Sample visuel ----
+        sample_saved = False
+        if is_sample(image_id):
+            sam_arr = None
+            if uploaded_sam_path and uploaded_sam_path.exists():
+                sam_arr = np.array(Image.open(uploaded_sam_path).convert("L"))
+            elif (local := find_server_sam_mask(image_id)):
+                sam_arr = np.array(Image.open(local).convert("L"))
+
+            # Récupère wz_oseg et adres_q s'ils existent déjà dans samples/
+            def _load_sample_img(name: str):
+                p = SAMPLES_DIR / image_id / name
+                return np.array(Image.open(p).convert("RGB")) if p.exists() else None
+
+            # Pour la branche reference on complète la planche existante
+            # avec jpeg et jp2roi en colonnes supplémentaires.
+            # save_sample écrase comparison.png — on passe jpeg/jp2roi
+            # comme adres_q/adres_e pour réutiliser la même fonction,
+            # puis on renomme les fichiers.
+            out_dir = SAMPLES_DIR / image_id
+            out_dir.mkdir(parents=True, exist_ok=True)
+
+            if jpeg_rgb is not None:
+                Image.fromarray(jpeg_rgb.astype(np.uint8), "RGB").save(
+                    out_dir / "jpeg.png", "PNG")
+            if jp2roi_rgb is not None:
+                Image.fromarray(jp2roi_rgb.astype(np.uint8), "RGB").save(
+                    out_dir / "jp2roi.png", "PNG")
+
+            # Reconstruction de la planche complète avec toutes les colonnes
+            # disponibles dans le dossier sample
+            _PANEL_COLS_REF = [
+                ("original",  "Original"),
+                ("sam_mask",  "SAM mask"),
+                ("otsu_mask", "Otsu mask"),
+                ("wz_oseg",   "WZ-OSEG"),
+                ("adres_q",   "ADRES-Q"),
+                ("adres_e",   "ADRES-E"),
+                ("jpeg",      "JPEG"),
+                ("jp2roi",    "JPEG2000-ROI"),
+            ]
+
+            def _load_arr(fname):
+                p = out_dir / fname
+                if not p.exists():
+                    return None
+                img = Image.open(p).convert("RGB")
+                return np.array(img)
+
+            images_dict = {k: _load_arr(f"{k}.png") for k, _ in _PANEL_COLS_REF}
+            images_dict["original"] = original_rgb
+            if sam_arr is not None:
+                images_dict["sam_mask"] = sam_arr
+
+            # Sauvegarde planche avec colonnes reference
+            try:
+                # Réutilise _build_comparison avec la liste de colonnes étendue
+                from PIL import ImageDraw, ImageFont
+                _THUMB_W = 160; _PAD = 4; _LABEL_H = 22
+                cols = [(k, lbl) for k, lbl in _PANEL_COLS_REF
+                        if images_dict.get(k) is not None]
+                if cols:
+                    ref_arr = images_dict[cols[0][0]]
+                    h0, w0  = ref_arr.shape[:2]
+                    thumb_h = round(_THUMB_W * h0 / w0)
+                    panel   = Image.new("RGB",
+                        (len(cols)*(_THUMB_W+_PAD)-_PAD, thumb_h+_LABEL_H),
+                        (245, 245, 245))
+                    try:
+                        font = ImageFont.truetype(
+                            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 11)
+                    except Exception:
+                        font = ImageFont.load_default()
+                    draw = ImageDraw.Draw(panel)
+                    for ci, (key, label) in enumerate(cols):
+                        arr = images_dict[key]
+                        if arr.ndim == 2:
+                            arr = np.stack([arr]*3, axis=-1)
+                        thumb = Image.fromarray(arr.astype(np.uint8), "RGB").resize(
+                            (_THUMB_W, thumb_h), Image.LANCZOS)
+                        x0 = ci * (_THUMB_W + _PAD)
+                        panel.paste(thumb, (x0, 0))
+                        bbox   = draw.textbbox((0,0), label, font=font)
+                        text_w = bbox[2] - bbox[0]
+                        draw.text((x0+((_THUMB_W-text_w)//2), thumb_h+2),
+                                  label, fill=(30,30,30), font=font)
+                    panel.save(out_dir / "comparison.png", "PNG")
+                    print(f"[Samples] Planche complète (référence) : "
+                          f"{out_dir / 'comparison.png'}")
+            except Exception as exc:
+                print(f"[Samples] Erreur planche reference {image_id}: {exc}")
+
+            sample_saved = True
+
+        return JSONResponse({
+            "status": "ok", "image_id": image_id,
+            "rows_appended": len(results),
+            "mask_ref_source": mask_ref_source,
+            "sample_saved": sample_saved,
+        })
 
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Erreur traitement {image_id}: {exc}")
+        raise HTTPException(status_code=500,
+                            detail=f"Erreur traitement {image_id}: {exc}")
 
 
 # ---------------------------------------------------------------------------
