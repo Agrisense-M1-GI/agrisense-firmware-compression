@@ -425,11 +425,17 @@ static int cmd_transcode_decode(const char *in_path, int bw, int n_class_blocks,
          * empty (JERR_EMPTY_IMAGE). */
         comp->width_in_blocks = (JDIMENSION)width_in_blocks[ci];
         comp->height_in_blocks = (JDIMENSION)height_in_blocks[ci];
+        /* Same story for the DCT block size -- normally set to 8x8 by
+         * jpeg_start_compress()'s initial setup, which we never call. */
+        comp->DCT_h_scaled_size = DCTSIZE;
+        comp->DCT_v_scaled_size = DCTSIZE;
         coef_arrays[ci] = (cinfo.mem->request_virt_barray)(
             (j_common_ptr)&cinfo, JPOOL_IMAGE, TRUE,
             (JDIMENSION)width_in_blocks[ci], (JDIMENSION)height_in_blocks[ci],
             (JDIMENSION)comp->v_samp_factor);
     }
+    cinfo.min_DCT_h_scaled_size = DCTSIZE;
+    cinfo.min_DCT_v_scaled_size = DCTSIZE;
 
     jpeg_write_coefficients(&cinfo, coef_arrays);
 
