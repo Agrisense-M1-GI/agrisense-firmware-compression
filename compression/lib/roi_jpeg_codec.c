@@ -263,7 +263,8 @@ static void unpack_class(Image *compact, unsigned char *map, int bw, int bh, int
  * row-major for jpeg_add_quant_table's basic_table argument, so no
  * reordering is needed here; qtable files are already row-major. */
 
-static void jpeg_encode_custom_q(Image *img, unsigned int qtable[64], const char *out_path) {
+static void jpeg_encode_custom_q(Image *img, unsigned int qtable[64], const char *out_path,
+                                  const int *samp_h, const int *samp_v) {
   struct jpeg_compress_struct cinfo;
   struct my_error_mgr jerr;
   FILE *outfile = fopen(out_path, "wb");
@@ -295,7 +296,16 @@ static void jpeg_encode_custom_q(Image *img, unsigned int qtable[64], const char
   cinfo.comp_info[1].quant_tbl_no = 1; /* Cb -> standard table */
   cinfo.comp_info[2].quant_tbl_no = 1; /* Cr -> standard table */
 
+  /* jpeg_set_colorspace() (re)sets default sampling factors for the new
+   * colorspace, so any --sample override must be applied AFTER this
+   * call, not before -- otherwise it gets silently overwritten. */
   jpeg_set_colorspace(&cinfo, JCS_YCbCr);
+  if (samp_h != NULL && samp_v != NULL) {
+    for (int c = 0; c < 3; c++) {
+      cinfo.comp_info[c].h_samp_factor = samp_h[c];
+      cinfo.comp_info[c].v_samp_factor = samp_v[c];
+    }
+  }
   jpeg_start_compress(&cinfo, TRUE);
 
   JSAMPROW row_pointer[1];
@@ -307,6 +317,14 @@ static void jpeg_encode_custom_q(Image *img, unsigned int qtable[64], const char
   jpeg_finish_compress(&cinfo);
   fclose(outfile);
   jpeg_destroy_compress(&cinfo);
+}
+
+/* Parses "H1xV1,H2xV2,H3xV3" (same convention as cjpeg's -sample), e.g.
+ * "4x1,1x1,4x1" for 4:1:4. Returns 1 on success, 0 on malformed input. */
+static int parse_sample_factors(const char *spec, int h[3], int v[3]) {
+  int n = sscanf(spec, "%dx%d,%dx%d,%dx%d",
+                 &h[0], &v[0], &h[1], &v[1], &h[2], &v[2]);
+  return n == 6;
 }
 
 static Image *jpeg_decode(const char *in_path) {
@@ -349,7 +367,7 @@ static Image *jpeg_decode(const char *in_path) {
 static void usage(const char *prog) {
   fprintf(stderr,
     "Usage:\n"
-    "  %s encode <in.ppm> <blockmap.bin> <bw> <bh> <qveg.txt> <qbg.txt> <out_veg.jpg> <out_bg.jpg>\n"
+    "  %s encode <in.ppm> <blockmap.bin> <bw> <bh> <qveg.txt> <qbg.txt> <out_veg.jpg> <out_bg.jpg> [--sample H1xV1,H2xV2,H3xV3]\n"
     "  %s decode <veg.jpg> <bg.jpg> <blockmap.bin> <bw> <bh> <orig_w> <orig_h> <out.ppm>\n",
     prog, prog);
 }
@@ -365,12 +383,23 @@ int main(int argc, char **argv) {
   if (argc < 2) { usage(argv[0]); return 1; }
 
   if (strcmp(argv[1], "encode") == 0) {
-    if (argc != 10) { usage(argv[0]); return 1; }
+    if (argc != 10 && argc != 12) { usage(argv[0]); return 1; }
     const char *in_path = argv[2];
     const char *blockmap_path = argv[3];
     int bw = atoi(argv[4]), bh = atoi(argv[5]);
     const char *qveg_path = argv[6], *qbg_path = argv[7];
     const char *out_veg = argv[8], *out_bg = argv[9];
+
+    int samp_h[3], samp_v[3];
+    int has_sample = 0;
+    if (argc == 12) {
+      if (strcmp(argv[10], "--sample") != 0) { usage(argv[0]); return 1; }
+      if (!parse_sample_factors(argv[11], samp_h, samp_v)) {
+        fprintf(stderr, "malformed --sample value: %s (expected H1xV1,H2xV2,H3xV3)\n", argv[11]);
+        return 1;
+      }
+      has_sample = 1;
+    }
 
     Image *src = ppm_read(in_path);
     int actual_bw, actual_bh;
@@ -390,8 +419,8 @@ int main(int argc, char **argv) {
     Image *veg_img = pack_class(padded, map, bw, bh, 1);
     Image *bg_img  = pack_class(padded, map, bw, bh, 0);
 
-    jpeg_encode_custom_q(veg_img, qveg, out_veg);
-    jpeg_encode_custom_q(bg_img,  qbg,  out_bg);
+    jpeg_encode_custom_q(veg_img, qveg, out_veg, has_sample ? samp_h : NULL, has_sample ? samp_v : NULL);
+    jpeg_encode_custom_q(bg_img,  qbg,  out_bg,  has_sample ? samp_h : NULL, has_sample ? samp_v : NULL);
 
     image_free(src); image_free(padded); image_free(veg_img); image_free(bg_img);
     free(map);

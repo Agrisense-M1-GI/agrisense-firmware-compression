@@ -90,11 +90,18 @@ def _encode_core(img_bgr, ppm_path: str, tmp_dir: str) -> bytes:
     veg_path = os.path.join(tmp_dir, "veg.jpg")
     bg_path = os.path.join(tmp_dir, "bg.jpg")
 
+    if not os.path.exists(config.ROI_JPEG_CODEC_BIN):
+        raise RuntimeError(
+            f"roi_jpeg_codec not found at {config.ROI_JPEG_CODEC_BIN} -- "
+            f"build it first: compression/lib/build.sh"
+        )
+
     cmd = [
         config.ROI_JPEG_CODEC_BIN, "encode",
         ppm_path, blockmap_path, str(bw), str(bh),
         config.QVEG_TABLE_PATH, config.QBG_TABLE_PATH,
         veg_path, bg_path,
+        "--sample", config.ROI_JPEG_SAMPLE_FACTORS,
     ]
     result = subprocess.run(cmd, capture_output=True)
     if result.returncode != 0:

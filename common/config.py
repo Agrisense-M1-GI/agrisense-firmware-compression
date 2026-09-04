@@ -20,8 +20,8 @@ LOGS_DIR = os.path.join(NODE_ROOT, "logs")
 RESULTS_DIR = os.path.join(NODE_ROOT, "results")
 
 # Identifies this branch/configuration in logs and result filenames.
-BRANCH_NAME = "algo/jpeg-qveg-qbg"
-RESULTS_CSV = os.path.join(RESULTS_DIR, "resultats_jpeg-qveg-qbg.csv")
+BRANCH_NAME = "algo/jpeg-qveg-qbg-4x1x4"
+RESULTS_CSV = os.path.join(RESULTS_DIR, "resultats_jpeg-qveg-qbg-4x1x4.csv")
 
 # --- Change-detection gate thresholds (Section 4.2, step 2) ------------
 # Ported from the real "garde_fou_energetique.py" v2 implementation:
@@ -83,7 +83,7 @@ LAST_CAPTURE_PATH = os.path.join(NODE_ROOT, "last_capture.png")
 # --- Station link (Section 4.2, step 8) ---------------------------------
 # CALIBRATE: replace with the station's real address on your network.
 STATION_UPLOAD_URL = os.environ.get(
-    "AGRISENSE_STATION_URL", "http://192.168.0.150:8000/upload"
+    "AGRISENSE_STATION_URL", "http://10.124.54.150:8000/upload"
 )
 
 # --- Branch-specific compression parameters (Section 4.3) --------------
@@ -96,6 +96,12 @@ STATION_UPLOAD_URL = os.environ.get(
 # Qveg/Qbg differentiation yet, pending the sorted random search
 # (Sampson et al., arXiv:2003.02874).
 QVEG_QBG_BLOCK_SIZE = 8
+# Chroma subsampling applied to both compact JPEG streams (veg and bg),
+# via roi_jpeg_codec's --sample flag. Verified empirically against the
+# produced SOF marker: (4,1)/(1,1)/(4,1) -- Cb heavily subsampled
+# horizontally, Cr at full resolution like Y (same asymmetry already
+# identified and verified for algo/jpeg-4x1x4).
+ROI_JPEG_SAMPLE_FACTORS = "4x1,1x1,4x1"
 QTABLES_DIR = os.path.join(os.path.dirname(__file__), "..", "compression", "qtables")
 QVEG_TABLE_PATH = os.path.join(QTABLES_DIR, "qveg_placeholder.txt")
 QBG_TABLE_PATH = os.path.join(QTABLES_DIR, "qbg_placeholder.txt")
