@@ -1,20 +1,15 @@
 """
-station_decoder/quality.py — algo/jpeg-baseline
-==================================================
-Branch-specific quality metrics, called generically by the standalone
-station receiver.
-
-This branch has no segmentation in its pipeline (Section~branches), so
-only whole-image PSNR/SSIM is computed -- no vegetation/fond zoning.
-Branches with segmentation active should instead recompute
-common.vari.classify_blocks_composite() on the reference image here and
-report both whole-image and zoned metrics.
+station_decoder/quality.py — algo/agrijpeg-light
+====================================================
+No segmentation on this branch -- whole-image PSNR/SSIM only, same as
+algo/jpeg-baseline. `mask` kept in the signature only so the call
+matches every other branch's station_decoder/quality.py.
 """
 
 from common import quality as quality_math
 
 
-def compute_quality(decoded_bgr, reference_bgr) -> dict:
+def compute_quality(decoded_bgr, reference_bgr, mask=None) -> dict:
     if decoded_bgr.shape != reference_bgr.shape:
         raise ValueError(
             f"Shape mismatch: decoded {decoded_bgr.shape} vs "

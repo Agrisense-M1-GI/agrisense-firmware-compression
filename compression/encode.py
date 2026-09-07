@@ -1,20 +1,16 @@
 """
-compression/encode.py — algo/jpeg-baseline
-===========================================
-Standard JPEG (libjpeg IJG v9e), quality 75, subsampling 4:2:0.
-This is Experience A of the ablation study (Section 4.3): the baseline
-against which every other configuration is compared.
+compression/encode.py — algo/agrijpeg-light
+===============================================
+No segmentation, no tiling, no mask -- a single standard JPEG (custom
+global luminance table Q_light, calibrated via sorted random search
+around the standard IJG table; 4:1:4 chroma sub-sampling, unchanged
+from jpeg-4x1x4) with its Huffman stage replaced by rANS
+(rans_jpeg_codec, same tool as agrijpeg-core).
 
-Two entry points:
-- encode(img_bgr): NORMAL mode, live webcam frame (numpy array) — no
-  lossless twin exists on disk, so we still write a temporary PPM for
-  cjpeg to read (it doesn't read PNG/raw arrays directly).
-- encode_from_ppm(ppm_path): TEST mode — the reference dataset ships a
-  lossless PPM twin next to every PNG specifically so this step can skip
-  decode + re-encode entirely and hand cjpeg the existing file directly.
-
-Branch name and compression parameters (quality, subsampling) are read
-from common/config.py, the single source of truth for this branch.
+compressed_bytes is the raw .rans bytes -- no container, no embedded
+metadata at all. The station reconstructs bw/n_class_blocks from
+CAPTURE_WIDTH/CAPTURE_HEIGHT (fixed, known on both sides), so nothing
+beyond the .rans stream itself needs to be transmitted.
 """
 
 import os
@@ -28,49 +24,31 @@ from common import config
 
 
 def encode(img_bgr) -> tuple[bytes, dict]:
-    """
-    Compresses a live BGR frame (numpy array, NORMAL mode) with this
-    branch's cjpeg. Returns (compressed_bytes, extra_metrics) where
-    extra_metrics is a dict of branch-specific fields worth keeping
-    around (empty here, since baseline has no extra parameters beyond
-    quality/subsampling, already fixed by the protocol).
-    """
     t0 = time.time()
-
     with tempfile.TemporaryDirectory() as tmp:
         ppm_path = os.path.join(tmp, "input.ppm")
-        jpg_path = os.path.join(tmp, "output.jpg")
-
-        # Lossless intermediate format cjpeg can actually read.
         cv2.imwrite(ppm_path, img_bgr)
-
-        compressed_bytes = _run_cjpeg(ppm_path, jpg_path)
-
+        compressed_bytes = _encode_core(ppm_path, tmp)
     compression_time_ms = (time.time() - t0) * 1000.0
     return compressed_bytes, {"compression_time_ms": compression_time_ms}
 
 
 def encode_from_ppm(ppm_path: str) -> tuple[bytes, dict]:
-    """
-    Compresses an existing PPM file (TEST mode) directly — no decode, no
-    intermediate write. The dataset provides this PPM twin ahead of time
-    for exactly this purpose, so the measured window only ever contains
-    the compression step itself, not a PNG->PPM conversion.
-    """
     t0 = time.time()
-
     with tempfile.TemporaryDirectory() as tmp:
-        jpg_path = os.path.join(tmp, "output.jpg")
-        compressed_bytes = _run_cjpeg(ppm_path, jpg_path)
-
+        compressed_bytes = _encode_core(ppm_path, tmp)
     compression_time_ms = (time.time() - t0) * 1000.0
     return compressed_bytes, {"compression_time_ms": compression_time_ms}
 
 
-def _run_cjpeg(ppm_path: str, jpg_path: str) -> bytes:
+def _encode_core(ppm_path: str, tmp_dir: str) -> bytes:
+    jpg_path = os.path.join(tmp_dir, "out.jpg")
+
     cmd = [
         config.CJPEG_BIN,
         "-quality", str(config.JPEG_QUALITY),
+        "-qtables", config.QTABLE_LIGHT_PATH,
+        "-qslots", "0,1,1",
         "-sample", config.JPEG_SAMPLE_FACTORS,
         "-outfile", jpg_path,
         ppm_path,
@@ -82,5 +60,22 @@ def _run_cjpeg(ppm_path: str, jpg_path: str) -> bytes:
             f"{result.stderr.decode(errors='replace')}"
         )
 
-    with open(jpg_path, "rb") as f:
+    if not os.path.exists(config.RANS_JPEG_CODEC_BIN):
+        raise RuntimeError(
+            f"rans_jpeg_codec not found at {config.RANS_JPEG_CODEC_BIN} -- "
+            f"build it first: compression/lib/build.sh"
+        )
+
+    rans_path = os.path.join(tmp_dir, "out.rans")
+    result = subprocess.run(
+        [config.RANS_JPEG_CODEC_BIN, "transcode-encode", jpg_path, rans_path],
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"rans_jpeg_codec transcode-encode failed (code {result.returncode}): "
+            f"{result.stderr.decode(errors='replace')}"
+        )
+
+    with open(rans_path, "rb") as f:
         return f.read()

@@ -20,8 +20,8 @@ LOGS_DIR = os.path.join(NODE_ROOT, "logs")
 RESULTS_DIR = os.path.join(NODE_ROOT, "results")
 
 # Identifies this branch/configuration in logs and result filenames.
-BRANCH_NAME = "algo/jpeg-4x1x4"
-RESULTS_CSV = os.path.join(RESULTS_DIR, "resultats_jpeg-4x1x4.csv")
+BRANCH_NAME = "algo/agrijpeg-light"
+RESULTS_CSV = os.path.join(RESULTS_DIR, "resultats_agrijpeg-light.csv")
 
 # --- Change-detection gate thresholds (Section 4.2, step 2) ------------
 # Ported from the real "garde_fou_energetique.py" v2 implementation:
@@ -87,7 +87,7 @@ STATION_UPLOAD_URL = os.environ.get(
 )
 
 # --- Branch-specific compression parameters (Section 4.3) --------------
-# algo/jpeg-4x1x4: identical to algo/jpeg-baseline except for chroma
+# algo/agrijpeg-light: identical to algo/jpeg-baseline except for chroma
 # subsampling -- JPEG standard libjpeg IJG v9e, quality Q75, 4:1:4.
 JPEG_QUALITY = 75
 JPEG_SAMPLE_FACTORS = "4x1,1x1,4x1"  # cjpeg -sample argument -> 4:1:4
@@ -101,3 +101,10 @@ JPEG_SAMPLE_FACTORS = "4x1,1x1,4x1"  # cjpeg -sample argument -> 4:1:4
 JPEG_LIB_DIR = os.path.join(os.path.dirname(__file__), "..", "compression", "lib")
 CJPEG_BIN = os.path.join(JPEG_LIB_DIR, "jpeg-9e", "cjpeg")
 DJPEG_BIN = os.path.join(JPEG_LIB_DIR, "jpeg-9e", "djpeg")
+
+# Calibrated global luminance table (sorted random search around the
+# standard IJG table), placed alongside the branch, not transmitted.
+QTABLE_LIGHT_PATH = os.path.join(os.path.dirname(__file__), "..", "compression", "qtables", "qtable_light.txt")
+
+# rans_jpeg_codec, linked against this branch's own jpeg-9e.
+RANS_JPEG_CODEC_BIN = os.path.join(JPEG_LIB_DIR, "rans_jpeg_codec")
