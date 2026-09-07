@@ -437,7 +437,7 @@ static void decode_component_blocks(const uint8_t *rans_dc, const uint8_t *bits_
 
 static int cmd_transcode_decode(const char *in_path, int bw, int n_class_blocks,
                                  const char *qtable_path, const char *out_path,
-                                 const int *samp_h, const int *samp_v) {
+                                 const int *samp_h, const int *samp_v, int cjpeg_quality) {
     int canvas_w = bw * 8;
     int canvas_h = ((n_class_blocks + bw - 1) / bw) * 8;
 
@@ -491,7 +491,20 @@ static int cmd_transcode_decode(const char *in_path, int bw, int n_class_blocks,
     jpeg_set_defaults(&cinfo);
     cinfo.jpeg_width = canvas_w;
     cinfo.jpeg_height = canvas_h;
-    jpeg_add_quant_table(&cinfo, 0, (const unsigned int *)qtable, 100, TRUE);
+
+    int scale_factor = 100; /* literal, matches encode-side jpeg_add_quant_table(...,100,...)
+                                used everywhere that doesn't go through plain cjpeg -quality
+                                (e.g. roi_jpeg_codec / agrijpeg-core) -- unchanged default. */
+    if (cjpeg_quality > 0) {
+        /* This branch's encoder is plain cjpeg with "-quality N -qtables ...":
+         * real cjpeg scales BOTH the user-supplied table AND its own default
+         * chroma table by jpeg_quality_scaling(N) before embedding them --
+         * replicate that exactly, or dequantization silently uses the wrong
+         * divisor and the image comes out badly degraded. */
+        scale_factor = jpeg_quality_scaling(cjpeg_quality);
+        jpeg_set_quality(&cinfo, cjpeg_quality, TRUE); /* scales the default chroma table too */
+    }
+    jpeg_add_quant_table(&cinfo, 0, (const unsigned int *)qtable, scale_factor, TRUE);
     cinfo.comp_info[0].quant_tbl_no = 0;
     cinfo.comp_info[1].quant_tbl_no = 1;
     cinfo.comp_info[2].quant_tbl_no = 1;
@@ -561,7 +574,19 @@ static void usage(const char *prog) {
     fprintf(stderr,
         "Usage:\n"
         "  %s transcode-encode <in.jpg> <out.rans>\n"
-        "  %s transcode-decode <in.rans> <bw> <n_class_blocks> <qtable.txt> <out.jpg> [--sample H1xV1,H2xV2,H3xV3]\n",
+        "  %s transcode-decode <in.rans> <bw> <n_class_blocks> <qtable.txt> <out.jpg> "
+        "[--sample H1xV1,H2xV2,H3xV3] [--quality N]\n"
+        "\n"
+        "  --quality N: ONLY needed if the branch's encoder is plain cjpeg with "
+        "\"-quality N -qtables ...\"\n"
+        "  (e.g. agrijpeg-light) -- real cjpeg scales the supplied table (and its "
+        "own default chroma\n"
+        "  table) by jpeg_quality_scaling(N) before embedding it, so decode must "
+        "replicate that exactly\n"
+        "  or dequantization silently uses the wrong divisor. Omit it (default: "
+        "literal, unscaled) for\n"
+        "  branches whose own encoder (roi_jpeg_codec) already applies the qtable "
+        "as-is, e.g. agrijpeg-core.\n",
         prog, prog);
 }
 
@@ -574,18 +599,30 @@ int main(int argc, char **argv) {
     }
 
     if (strcmp(argv[1], "transcode-decode") == 0) {
-        if (argc != 7 && argc != 9) { usage(argv[0]); return 1; }
+        if (argc < 7) { usage(argv[0]); return 1; }
         int bw = atoi(argv[3]);
         int n_class_blocks = atoi(argv[4]);
         int samp_h[3] = {2, 1, 1}, samp_v[3] = {2, 1, 1};
-        if (argc == 9) {
-            if (strcmp(argv[7], "--sample") != 0) { usage(argv[0]); return 1; }
-            if (!parse_sample_factors(argv[8], samp_h, samp_v)) {
-                fprintf(stderr, "malformed --sample: %s\n", argv[8]);
+        int cjpeg_quality = -1; /* -1 = literal scale_factor=100, unchanged default */
+
+        int i = 7;
+        while (i < argc) {
+            if (strcmp(argv[i], "--sample") == 0 && i + 1 < argc) {
+                if (!parse_sample_factors(argv[i + 1], samp_h, samp_v)) {
+                    fprintf(stderr, "malformed --sample: %s\n", argv[i + 1]);
+                    return 1;
+                }
+                i += 2;
+            } else if (strcmp(argv[i], "--quality") == 0 && i + 1 < argc) {
+                cjpeg_quality = atoi(argv[i + 1]);
+                i += 2;
+            } else {
+                usage(argv[0]);
                 return 1;
             }
         }
-        return cmd_transcode_decode(argv[2], bw, n_class_blocks, argv[5], argv[6], samp_h, samp_v);
+        return cmd_transcode_decode(argv[2], bw, n_class_blocks, argv[5], argv[6],
+                                     samp_h, samp_v, cjpeg_quality);
     }
 
     usage(argv[0]);

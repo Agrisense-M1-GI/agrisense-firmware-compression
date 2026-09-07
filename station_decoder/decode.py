@@ -67,6 +67,7 @@ def _transcode_decode_to_jpg(compressed_bytes: bytes, bw: int, n_class_blocks: i
         config.RANS_JPEG_CODEC_BIN, "transcode-decode",
         rans_path, str(bw), str(n_class_blocks), config.QTABLE_LIGHT_PATH, jpg_path,
         "--sample", config.JPEG_SAMPLE_FACTORS,
+        "--quality", str(config.JPEG_QUALITY),
     ]
     result = subprocess.run(cmd, capture_output=True)
     if result.returncode != 0:
