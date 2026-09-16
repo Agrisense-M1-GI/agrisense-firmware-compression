@@ -1,4 +1,3 @@
-output/
 *.pyc
 __pycache__/
 *.o
