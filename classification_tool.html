@@ -1,0 +1,641 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<title>Classification saine / malade + augmentation</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --border: #2a2e38;
+    --text: #e8e9ec;
+    --muted: #8a8f9c;
+    --sain: #22c55e;
+    --malade: #ef4444;
+    --accent: #3b82f6;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+  }
+  header {
+    padding: 16px 24px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+  h1 { font-size: 18px; margin: 0; font-weight: 600; }
+  .tabs { display: flex; gap: 4px; }
+  .tab-btn {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    padding: 8px 16px;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 14px;
+  }
+  .tab-btn.active { background: var(--panel); color: var(--text); border-color: var(--accent); }
+  main { padding: 24px; max-width: 900px; margin: 0 auto; }
+  .panel { display: none; }
+  .panel.active { display: block; }
+  .setup-row {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+    align-items: center;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    padding: 16px;
+    border-radius: 12px;
+    margin-bottom: 20px;
+  }
+  button {
+    background: var(--accent);
+    color: white;
+    border: none;
+    padding: 10px 16px;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 500;
+  }
+  button:hover { opacity: 0.9; }
+  button:disabled { background: #333748; color: #666; cursor: not-allowed; }
+  .status { font-size: 13px; color: var(--muted); }
+  .status.ok { color: var(--sain); }
+  .counters {
+    display: flex;
+    gap: 16px;
+    margin-bottom: 20px;
+  }
+  .counter {
+    flex: 1;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px;
+    text-align: center;
+  }
+  .counter .num { font-size: 28px; font-weight: 700; }
+  .counter .label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-top: 4px; }
+  .counter.sain .num { color: var(--sain); }
+  .counter.malade .num { color: var(--malade); }
+  .counter.total .num { color: var(--accent); }
+  .stage { display: none; }
+  .stage.active { display: block; }
+  .image-box {
+    max-width: 560px;
+    margin: 0 auto;
+    background: var(--panel);
+    border: 2px solid var(--border);
+    border-radius: 12px;
+    overflow: hidden;
+  }
+  .image-box img {
+    width: 100%;
+    height: 460px;
+    object-fit: contain;
+    background: #000;
+    display: block;
+  }
+  .image-box .fname {
+    padding: 10px 14px;
+    font-size: 13px;
+    color: var(--muted);
+    text-align: center;
+    border-top: 1px solid var(--border);
+  }
+  .key-hints {
+    display: flex;
+    justify-content: center;
+    gap: 40px;
+    margin-top: 24px;
+  }
+  .key-hint {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 15px;
+    color: var(--muted);
+  }
+  kbd {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    font-weight: 700;
+    font-size: 16px;
+  }
+  .key-hint.sain kbd { border-color: var(--sain); color: var(--sain); }
+  .key-hint.malade kbd { border-color: var(--malade); color: var(--malade); }
+  .empty-state {
+    text-align: center;
+    padding: 60px 20px;
+    color: var(--muted);
+  }
+  .empty-state .big { font-size: 40px; margin-bottom: 12px; }
+  .flash {
+    position: fixed;
+    top: 20px; left: 50%; transform: translateX(-50%);
+    padding: 10px 20px;
+    border-radius: 8px;
+    font-size: 14px;
+    background: var(--sain);
+    color: #06210f;
+    font-weight: 600;
+    opacity: 0;
+    transition: opacity 0.2s;
+    pointer-events: none;
+  }
+  .flash.show { opacity: 1; }
+  .log-list {
+    margin-top: 24px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 12px 16px;
+    max-height: 200px;
+    overflow-y: auto;
+    font-size: 12px;
+    color: var(--muted);
+    font-family: ui-monospace, monospace;
+  }
+  .log-list div { padding: 2px 0; }
+  .note { font-size: 12px; color: var(--muted); margin-top: 6px; }
+  .progress-info { text-align: center; font-size: 13px; color: var(--muted); margin-bottom: 16px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>🩺 Classification saine / malade</h1>
+  <div class="tabs">
+    <button class="tab-btn active" data-tab="classify">Classification</button>
+    <button class="tab-btn" data-tab="augment">Augmentation</button>
+  </div>
+</header>
+
+<main>
+
+  <!-- ================= ONGLET CLASSIFICATION ================= -->
+  <div class="panel active" id="panel-classify">
+
+    <div class="setup-row">
+      <button id="btn-pick-folder">📁 Choisir le dossier d'images</button>
+      <span class="status" id="status-folder">Aucun dossier sélectionné</span>
+    </div>
+    <div class="setup-row">
+      <button id="btn-open-csv">📂 Reprendre un CSV existant</button>
+      <button id="btn-new-csv">🆕 Créer un nouveau CSV</button>
+      <span class="status" id="status-csv">Aucun fichier CSV sélectionné</span>
+    </div>
+
+    <div class="counters">
+      <div class="counter sain">
+        <div class="num" id="count-sain">0</div>
+        <div class="label">Saines (label 1)</div>
+      </div>
+      <div class="counter malade">
+        <div class="num" id="count-malade">0</div>
+        <div class="label">Malades (label 0)</div>
+      </div>
+      <div class="counter total">
+        <div class="num" id="count-restant">0</div>
+        <div class="label">Restantes</div>
+      </div>
+    </div>
+
+    <div id="stage-empty" class="stage active empty-state">
+      <div class="big">👆</div>
+      Sélectionne d'abord le dossier d'images, puis le fichier CSV, pour commencer.
+    </div>
+
+    <div id="stage-image" class="stage">
+      <div class="progress-info" id="progress-info"></div>
+      <div class="image-box">
+        <img id="img-current" src="" alt="image à classer">
+        <div class="fname" id="fname-current">-</div>
+      </div>
+
+      <div class="key-hints">
+        <div class="key-hint sain"><kbd>1</kbd> Saine</div>
+        <div class="key-hint malade"><kbd>0</kbd> Malade</div>
+        <div class="key-hint"><kbd style="width:auto; padding:0 10px;">Espace</kbd> Passer</div>
+      </div>
+      <p class="note" style="text-align:center;">1 = saine, 0 = malade — l'enregistrement et le passage à l'image suivante sont automatiques.<br>Espace pour passer une image sans l'enregistrer.</p>
+    </div>
+
+    <div id="stage-done" class="stage empty-state">
+      <div class="big">✅</div>
+      Toutes les images du dossier ont été classées !
+    </div>
+
+    <div class="log-list" id="log-list"></div>
+  </div>
+
+  <!-- ================= ONGLET AUGMENTATION ================= -->
+  <div class="panel" id="panel-augment">
+    <p class="note">Cette étape lit ton CSV de classification, et pour chaque image déjà labellisée, génère une version tournée à 180° et une version miroir, avec le même label. Les nouvelles lignes sont ajoutées au CSV.</p>
+
+    <div class="setup-row">
+      <button id="btn-src-folder-aug">📁 Choisir le dossier des images originales</button>
+      <span class="status" id="status-src-folder-aug">Aucun dossier sélectionné</span>
+    </div>
+    <div class="setup-row">
+      <button id="btn-open-csv-aug">📂 Choisir le CSV de classification (rempli)</button>
+      <span class="status" id="status-csv-aug">Aucun fichier CSV sélectionné</span>
+    </div>
+    <div class="setup-row">
+      <button id="btn-out-folder-aug">📁 Choisir le dossier de sortie des images augmentées</button>
+      <span class="status" id="status-out-folder-aug">Aucun dossier sélectionné</span>
+    </div>
+    <div class="setup-row">
+      <button id="btn-run-augment" disabled>🚀 Lancer l'augmentation</button>
+      <span class="status" id="status-run-aug"></span>
+    </div>
+
+    <div class="log-list" id="log-list-aug"></div>
+  </div>
+
+</main>
+
+<div class="flash" id="flash">Enregistré ✓</div>
+<canvas id="work-canvas" style="display:none;"></canvas>
+
+<script>
+// ---------------------------------------------------------------
+// Utilitaires communs
+// ---------------------------------------------------------------
+function csvEscape(field) {
+  if (/[",\n]/.test(field)) return '"' + field.replace(/"/g, '""') + '"';
+  return field;
+}
+function parseCsv(text) {
+  const lines = text.split(/\r?\n/).filter(l => l.length > 0);
+  return lines.map(l => l.split(",").map(s => s.trim()));
+}
+async function readAllText(fileHandle) {
+  const file = await fileHandle.getFile();
+  return await file.text();
+}
+function showFlash(msg) {
+  const el = document.getElementById("flash");
+  el.textContent = msg;
+  el.classList.add("show");
+  setTimeout(() => el.classList.remove("show"), 500);
+}
+
+document.querySelectorAll(".tab-btn").forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    document.querySelectorAll(".panel").forEach(p => p.classList.remove("active"));
+    document.getElementById("panel-" + btn.dataset.tab).classList.add("active");
+  });
+});
+
+// ---------------------------------------------------------------
+// ONGLET CLASSIFICATION
+// ---------------------------------------------------------------
+let imageDirHandle = null;
+let imageFiles = [];
+let csvHandle = null;
+let labeled = new Map();  // filename -> label ("0" ou "1")
+let currentIndex = 0;
+let currentUrl = null;
+
+function log(msg, target = "log-list") {
+  const el = document.getElementById(target);
+  const line = document.createElement("div");
+  line.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+  el.prepend(line);
+}
+
+function updateCounters() {
+  let sain = 0, malade = 0;
+  labeled.forEach(v => { if (v === "1") sain++; else if (v === "0") malade++; });
+  document.getElementById("count-sain").textContent = sain;
+  document.getElementById("count-malade").textContent = malade;
+  const restant = imageFiles.filter(f => !labeled.has(f)).length;
+  document.getElementById("count-restant").textContent = restant;
+}
+
+function setStage(stage) {
+  ["empty", "image", "done"].forEach(s => {
+    document.getElementById("stage-" + s).classList.toggle("active", s === stage);
+  });
+}
+
+document.getElementById("btn-pick-folder").addEventListener("click", async () => {
+  try {
+    imageDirHandle = await window.showDirectoryPicker();
+    imageFiles = [];
+    for await (const entry of imageDirHandle.values()) {
+      if (entry.kind === "file" && /\.png$/i.test(entry.name)) imageFiles.push(entry.name);
+    }
+    imageFiles.sort();
+    document.getElementById("status-folder").textContent = `${imageFiles.length} images trouvées ✓`;
+    document.getElementById("status-folder").classList.add("ok");
+    log(`Dossier sélectionné : ${imageFiles.length} images .png trouvées.`);
+    maybeStart();
+  } catch (e) { if (e.name !== "AbortError") console.error(e); }
+});
+
+async function writeHeaderIfNeeded() {
+  const writable = await csvHandle.createWritable();
+  await writable.write("image,label\n");
+  await writable.close();
+}
+
+async function loadCsvHandle(handle) {
+  csvHandle = handle;
+  await csvHandle.requestPermission({ mode: "readwrite" });
+  let text = "";
+  try { text = await readAllText(csvHandle); } catch (e) { text = ""; }
+
+  labeled = new Map();
+  if (text.trim().length > 0) {
+    const rows = parseCsv(text);
+    for (const row of rows) {
+      if (row[0] === "image") continue;
+      const [name, label] = row;
+      if (!name) continue;
+      labeled.set(name, label);
+    }
+    log(`CSV chargé : ${labeled.size} images déjà classées.`);
+  } else {
+    await writeHeaderIfNeeded();
+    log("Nouveau fichier CSV créé avec en-tête.");
+  }
+
+  document.getElementById("status-csv").textContent = `${csvHandle.name} ✓`;
+  document.getElementById("status-csv").classList.add("ok");
+  updateCounters();
+  maybeStart();
+}
+
+document.getElementById("btn-open-csv").addEventListener("click", async () => {
+  try {
+    const [handle] = await window.showOpenFilePicker({
+      types: [{ description: "CSV", accept: { "text/csv": [".csv"] } }],
+      multiple: false
+    });
+    await loadCsvHandle(handle);
+  } catch (e) { if (e.name !== "AbortError") console.error(e); }
+});
+
+document.getElementById("btn-new-csv").addEventListener("click", async () => {
+  try {
+    const handle = await window.showSaveFilePicker({
+      suggestedName: "classification.csv",
+      types: [{ description: "CSV", accept: { "text/csv": [".csv"] } }]
+    });
+    await loadCsvHandle(handle);
+  } catch (e) { if (e.name !== "AbortError") console.error(e); }
+});
+
+function maybeStart() {
+  if (imageDirHandle && csvHandle && imageFiles.length > 0) {
+    goToNextImage();
+  }
+}
+
+function goToNextImage() {
+  const idx = imageFiles.findIndex(f => !labeled.has(f));
+  if (idx === -1) {
+    setStage("done");
+    return;
+  }
+  currentIndex = idx;
+  displayCurrent();
+  setStage("image");
+}
+
+async function displayCurrent() {
+  const name = imageFiles[currentIndex];
+  if (currentUrl) URL.revokeObjectURL(currentUrl);
+  const fileHandle = await imageDirHandle.getFileHandle(name);
+  const file = await fileHandle.getFile();
+  currentUrl = URL.createObjectURL(file);
+  document.getElementById("img-current").src = currentUrl;
+  document.getElementById("fname-current").textContent = name;
+  const done = imageFiles.filter(f => labeled.has(f)).length;
+  document.getElementById("progress-info").textContent = `${done} / ${imageFiles.length} images classées`;
+}
+
+async function appendRow(name, label) {
+  let text = "";
+  try { text = await readAllText(csvHandle); } catch (e) { text = "image,label\n"; }
+  if (!text.endsWith("\n")) text += "\n";
+  text += `${csvEscape(name)},${label}\n`;
+  const writable = await csvHandle.createWritable();
+  await writable.write(text);
+  await writable.close();
+}
+
+async function recordDecision(label) {
+  const name = imageFiles[currentIndex];
+  await appendRow(name, label);
+  labeled.set(name, String(label));
+  log(`${name} → label ${label} (${label === 1 ? "saine" : "malade"})`);
+  updateCounters();
+  showFlash(label === 1 ? "Saine ✓" : "Malade ✓");
+  goToNextImage();
+}
+
+function skipImage() {
+  const name = imageFiles[currentIndex];
+  log(`⏭️ Image passée : ${name} (non enregistrée).`);
+  // passe temporairement à la suivante non labellisée après celle-ci
+  const remaining = imageFiles.slice(currentIndex + 1).findIndex(f => !labeled.has(f));
+  if (remaining === -1) {
+    // plus rien après, on reste en boucle sur la même si c'est la seule restante
+    setStage("done");
+    return;
+  }
+  currentIndex = currentIndex + 1 + remaining;
+  displayCurrent();
+}
+
+document.addEventListener("keydown", (e) => {
+  const visible = document.getElementById("panel-classify").classList.contains("active");
+  const imgStage = document.getElementById("stage-image").classList.contains("active");
+  if (!visible || !imgStage) return;
+  if (e.key === "1") recordDecision(1);
+  else if (e.key === "0") recordDecision(0);
+  else if (e.key === " ") { e.preventDefault(); skipImage(); }
+});
+
+// ---------------------------------------------------------------
+// ONGLET AUGMENTATION
+// ---------------------------------------------------------------
+let srcDirHandleAug = null;
+let outDirHandleAug = null;
+let csvHandleAug = null;
+
+function logAug(msg) { log(msg, "log-list-aug"); }
+
+document.getElementById("btn-src-folder-aug").addEventListener("click", async () => {
+  try {
+    srcDirHandleAug = await window.showDirectoryPicker();
+    document.getElementById("status-src-folder-aug").textContent = "Dossier sélectionné ✓";
+    document.getElementById("status-src-folder-aug").classList.add("ok");
+    checkAugReady();
+  } catch (e) { if (e.name !== "AbortError") console.error(e); }
+});
+
+document.getElementById("btn-open-csv-aug").addEventListener("click", async () => {
+  try {
+    const [handle] = await window.showOpenFilePicker({
+      types: [{ description: "CSV", accept: { "text/csv": [".csv"] } }],
+      multiple: false
+    });
+    await handle.requestPermission({ mode: "readwrite" });
+    csvHandleAug = handle;
+    document.getElementById("status-csv-aug").textContent = `${handle.name} ✓`;
+    document.getElementById("status-csv-aug").classList.add("ok");
+    checkAugReady();
+  } catch (e) { if (e.name !== "AbortError") console.error(e); }
+});
+
+document.getElementById("btn-out-folder-aug").addEventListener("click", async () => {
+  try {
+    outDirHandleAug = await window.showDirectoryPicker();
+    document.getElementById("status-out-folder-aug").textContent = "Dossier sélectionné ✓";
+    document.getElementById("status-out-folder-aug").classList.add("ok");
+    checkAugReady();
+  } catch (e) { if (e.name !== "AbortError") console.error(e); }
+});
+
+function checkAugReady() {
+  document.getElementById("btn-run-augment").disabled =
+    !(srcDirHandleAug && outDirHandleAug && csvHandleAug);
+}
+
+function loadImageFromFile(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => { resolve({ img, url }); };
+    img.onerror = reject;
+    img.src = url;
+  });
+}
+
+async function canvasToPngBlob(canvas) {
+  return new Promise(resolve => canvas.toBlob(resolve, "image/png"));
+}
+
+async function writeBlobToDir(dirHandle, filename, blob) {
+  const fileHandle = await dirHandle.getFileHandle(filename, { create: true });
+  const writable = await fileHandle.createWritable();
+  await writable.write(blob);
+  await writable.close();
+}
+
+function stripExt(name) {
+  return name.replace(/\.png$/i, "");
+}
+
+document.getElementById("btn-run-augment").addEventListener("click", async () => {
+  const btn = document.getElementById("btn-run-augment");
+  btn.disabled = true;
+  document.getElementById("status-run-aug").textContent = "En cours...";
+
+  // Lit le CSV existant
+  let text = await readAllText(csvHandleAug);
+  const rows = parseCsv(text);
+  const header = rows[0] && rows[0][0] === "image" ? rows.shift() : ["image", "label"];
+
+  // Ensemble des noms déjà présents (pour ne pas ré-augmenter des images déjà augmentées,
+  // et ne pas dupliquer si le script est relancé)
+  const existingNames = new Set(rows.map(r => r[0]));
+  const originalRows = rows.filter(r => !/_(rot180|mirror)\.png$/i.test(r[0]));
+
+  const canvas = document.getElementById("work-canvas");
+  const ctx = canvas.getContext("2d");
+
+  let newRows = [];
+  let processed = 0, skipped = 0;
+
+  for (const [name, label] of originalRows) {
+    const rot180Name = `${stripExt(name)}_rot180.png`;
+    const mirrorName = `${stripExt(name)}_mirror.png`;
+
+    const needRot180 = !existingNames.has(rot180Name);
+    const needMirror = !existingNames.has(mirrorName);
+
+    if (!needRot180 && !needMirror) { skipped++; continue; }
+
+    let fileHandle, file;
+    try {
+      fileHandle = await srcDirHandleAug.getFileHandle(name);
+      file = await fileHandle.getFile();
+    } catch (e) {
+      logAug(`⚠️ Image introuvable dans le dossier source : ${name} (ignorée)`);
+      continue;
+    }
+
+    const { img, url } = await loadImageFromFile(file);
+    canvas.width = img.width;
+    canvas.height = img.height;
+
+    if (needRot180) {
+      ctx.save();
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.translate(canvas.width, canvas.height);
+      ctx.rotate(Math.PI);
+      ctx.drawImage(img, 0, 0);
+      ctx.restore();
+      const blob = await canvasToPngBlob(canvas);
+      await writeBlobToDir(outDirHandleAug, rot180Name, blob);
+      newRows.push([rot180Name, label]);
+      existingNames.add(rot180Name);
+    }
+
+    if (needMirror) {
+      ctx.save();
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.translate(canvas.width, 0);
+      ctx.scale(-1, 1);
+      ctx.drawImage(img, 0, 0);
+      ctx.restore();
+      const blob = await canvasToPngBlob(canvas);
+      await writeBlobToDir(outDirHandleAug, mirrorName, blob);
+      newRows.push([mirrorName, label]);
+      existingNames.add(mirrorName);
+    }
+
+    URL.revokeObjectURL(url);
+    processed++;
+    logAug(`✓ ${name} → ${rot180Name}, ${mirrorName} (label ${label})`);
+  }
+
+  // Réécrit le CSV complet avec les nouvelles lignes ajoutées
+  const allRows = [header, ...rows, ...newRows];
+  const finalText = allRows.map(r => r.map(csvEscape).join(",")).join("\n") + "\n";
+  const writable = await csvHandleAug.createWritable();
+  await writable.write(finalText);
+  await writable.close();
+
+  document.getElementById("status-run-aug").textContent =
+    `Terminé : ${processed} images augmentées (${newRows.length} nouvelles lignes), ${skipped} déjà présentes.`;
+  logAug(`Terminé. ${newRows.length} nouvelles lignes ajoutées au CSV.`);
+  btn.disabled = false;
+});
+</script>
+
+</body>
+</html>

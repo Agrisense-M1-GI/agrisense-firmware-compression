@@ -1,0 +1,739 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<title>Outil d'annotation de paires d'images</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --border: #2a2e38;
+    --text: #e8e9ec;
+    --muted: #8a8f9c;
+    --accent1: #3b82f6;
+    --accent2: #f97316;
+    --green: #22c55e;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+  }
+  header {
+    padding: 16px 24px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+  h1 { font-size: 18px; margin: 0; font-weight: 600; }
+  .tabs { display: flex; gap: 4px; }
+  .tab-btn {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    padding: 8px 16px;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 14px;
+  }
+  .tab-btn.active { background: var(--panel); color: var(--text); border-color: var(--accent1); }
+  main { padding: 24px; max-width: 1200px; margin: 0 auto; }
+  .panel { display: none; }
+  .panel.active { display: block; }
+  .setup-row {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+    align-items: center;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    padding: 16px;
+    border-radius: 12px;
+    margin-bottom: 20px;
+  }
+  button {
+    background: var(--accent1);
+    color: white;
+    border: none;
+    padding: 10px 16px;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 500;
+  }
+  button:hover { opacity: 0.9; }
+  button:disabled { background: #333748; color: #666; cursor: not-allowed; }
+  .status { font-size: 13px; color: var(--muted); }
+  .status.ok { color: var(--green); }
+  .counters {
+    display: flex;
+    gap: 16px;
+    margin-bottom: 20px;
+  }
+  .counter {
+    flex: 1;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px;
+    text-align: center;
+  }
+  .counter .num { font-size: 28px; font-weight: 700; }
+  .counter .label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-top: 4px; }
+  .counter.sim .num { color: var(--accent1); }
+  .counter.diff .num { color: var(--accent2); }
+  .progress-bar {
+    height: 6px;
+    background: var(--border);
+    border-radius: 3px;
+    overflow: hidden;
+    margin-top: 10px;
+  }
+  .progress-bar .fill { height: 100%; background: currentColor; }
+  .stage {
+    display: none;
+  }
+  .stage.active { display: block; }
+  .image-pair {
+    display: flex;
+    gap: 16px;
+    justify-content: center;
+    align-items: stretch;
+  }
+  .image-box {
+    flex: 1;
+    max-width: 520px;
+    background: var(--panel);
+    border: 2px solid var(--border);
+    border-radius: 12px;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+  .image-box img {
+    width: 100%;
+    height: 420px;
+    object-fit: contain;
+    background: #000;
+    display: block;
+  }
+  .image-box .fname {
+    padding: 10px 14px;
+    font-size: 13px;
+    color: var(--muted);
+    text-align: center;
+    border-top: 1px solid var(--border);
+  }
+  .key-hints {
+    display: flex;
+    justify-content: center;
+    gap: 40px;
+    margin-top: 24px;
+  }
+  .key-hint {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 15px;
+    color: var(--muted);
+  }
+  kbd {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    font-weight: 700;
+    font-size: 16px;
+  }
+  .key-hint.sim kbd { border-color: var(--accent1); color: var(--accent1); }
+  .key-hint.diff kbd { border-color: var(--accent2); color: var(--accent2); }
+  .empty-state {
+    text-align: center;
+    padding: 60px 20px;
+    color: var(--muted);
+  }
+  .empty-state .big { font-size: 40px; margin-bottom: 12px; }
+  .flash {
+    position: fixed;
+    top: 20px; left: 50%; transform: translateX(-50%);
+    padding: 10px 20px;
+    border-radius: 8px;
+    font-size: 14px;
+    background: var(--green);
+    color: #06210f;
+    font-weight: 600;
+    opacity: 0;
+    transition: opacity 0.2s;
+    pointer-events: none;
+  }
+  .flash.show { opacity: 1; }
+  .log-list {
+    margin-top: 24px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 12px 16px;
+    max-height: 160px;
+    overflow-y: auto;
+    font-size: 12px;
+    color: var(--muted);
+    font-family: ui-monospace, monospace;
+  }
+  .log-list div { padding: 2px 0; }
+  .note {
+    font-size: 12px;
+    color: var(--muted);
+    margin-top: 6px;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>🖼️ Annotation de paires d'images</h1>
+  <div class="tabs">
+    <button class="tab-btn active" data-tab="annotate">Annotation (similaire / différente)</button>
+    <button class="tab-btn" data-tab="identical">Paires identiques</button>
+  </div>
+</header>
+
+<main>
+
+  <!-- ================= ONGLET ANNOTATION ================= -->
+  <div class="panel active" id="panel-annotate">
+
+    <div class="setup-row">
+      <button id="btn-pick-folder">📁 Choisir le dossier des 1377 images</button>
+      <span class="status" id="status-folder">Aucun dossier sélectionné</span>
+    </div>
+    <div class="setup-row">
+      <button id="btn-open-csv">📂 Reprendre un CSV existant</button>
+      <button id="btn-new-csv">🆕 Créer un nouveau CSV</button>
+      <span class="status" id="status-csv">Aucun fichier CSV sélectionné</span>
+    </div>
+
+    <div class="counters">
+      <div class="counter sim">
+        <div class="num" id="count-sim">0</div>
+        <div class="label">Similaires (label 1)</div>
+        <div class="progress-bar"><div class="fill" id="bar-sim" style="width:0%; color:var(--accent1);"></div></div>
+      </div>
+      <div class="counter diff">
+        <div class="num" id="count-diff">0</div>
+        <div class="label">Différentes (label 2)</div>
+        <div class="progress-bar"><div class="fill" id="bar-diff" style="width:0%; color:var(--accent2);"></div></div>
+      </div>
+    </div>
+
+    <div id="stage-empty" class="empty-state stage active">
+      <div class="big">👆</div>
+      Sélectionne d'abord le dossier d'images, puis le fichier CSV, pour commencer l'annotation.
+    </div>
+
+    <div id="stage-pair" class="stage">
+      <div class="image-pair">
+        <div class="image-box">
+          <img id="img-left" src="" alt="image 1">
+          <div class="fname" id="fname-left">-</div>
+        </div>
+        <div class="image-box">
+          <img id="img-right" src="" alt="image 2">
+          <div class="fname" id="fname-right">-</div>
+        </div>
+      </div>
+
+      <div class="key-hints">
+        <div class="key-hint sim"><kbd>1</kbd> Similaires</div>
+        <div class="key-hint diff"><kbd>2</kbd> Différentes</div>
+        <div class="key-hint"><kbd style="width:auto; padding:0 10px;">Espace</kbd> Passer</div>
+      </div>
+      <p class="note" style="text-align:center;">Appuie sur 1 ou 2 — l'enregistrement et le passage à la paire suivante sont automatiques.<br>
+      Appuie sur <b>Espace</b> (ou clique "Passer") pour ignorer une paire sans l'enregistrer — utile si une classe a déjà atteint son objectif.</p>
+      <div style="text-align:center; margin-top:12px;">
+        <button id="btn-skip">⏭️ Passer cette paire</button>
+      </div>
+    </div>
+
+    <div id="stage-done" class="stage empty-state">
+      <div class="big">✅</div>
+      Objectif atteint : 830 paires similaires et 830 paires différentes !<br>
+      Tu peux fermer l'outil, ou continuer à annoter si tu veux.
+      <div style="margin-top:16px;"><button id="btn-continue-anyway">Continuer quand même</button></div>
+    </div>
+
+    <div class="log-list" id="log-list"></div>
+  </div>
+
+  <!-- ================= ONGLET IDENTIQUES ================= -->
+  <div class="panel" id="panel-identical">
+    <div class="setup-row">
+      <button id="btn-pick-folder-identical">📁 Choisir le sous-dossier des 840 images identiques</button>
+      <span class="status" id="status-folder-identical">Aucun dossier sélectionné</span>
+    </div>
+    <div class="setup-row">
+      <button id="btn-open-csv-identical">📂 Reprendre le CSV existant</button>
+      <button id="btn-new-csv-identical">🆕 Créer un nouveau CSV</button>
+      <span class="status" id="status-csv-identical">Aucun fichier CSV sélectionné</span>
+    </div>
+    <div class="setup-row">
+      <button id="btn-generate-identical" disabled>➕ Ajouter les paires identiques au CSV</button>
+      <span class="status" id="status-generate-identical"></span>
+    </div>
+    <div class="log-list" id="log-list-identical"></div>
+  </div>
+
+</main>
+
+<div class="flash" id="flash">Enregistré ✓</div>
+
+<script>
+// ---------------------------------------------------------------
+// Utilitaires communs
+// ---------------------------------------------------------------
+
+function csvEscape(field) {
+  if (/[",\n]/.test(field)) {
+    return '"' + field.replace(/"/g, '""') + '"';
+  }
+  return field;
+}
+
+function parseCsv(text) {
+  // Parseur CSV simple (pas de champs multi-lignes attendus ici)
+  const lines = text.split(/\r?\n/).filter(l => l.length > 0);
+  const rows = [];
+  for (const line of lines) {
+    rows.push(line.split(",").map(s => s.trim()));
+  }
+  return rows;
+}
+
+async function readAllText(fileHandle) {
+  const file = await fileHandle.getFile();
+  return await file.text();
+}
+
+function pairKey(a, b) {
+  return [a, b].sort().join("||");
+}
+
+function showFlash(msg) {
+  const el = document.getElementById("flash");
+  el.textContent = msg;
+  el.classList.add("show");
+  setTimeout(() => el.classList.remove("show"), 500);
+}
+
+// ---------------------------------------------------------------
+// Onglet navigation
+// ---------------------------------------------------------------
+document.querySelectorAll(".tab-btn").forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    document.querySelectorAll(".panel").forEach(p => p.classList.remove("active"));
+    document.getElementById("panel-" + btn.dataset.tab).classList.add("active");
+  });
+});
+
+// ---------------------------------------------------------------
+// ONGLET ANNOTATION
+// ---------------------------------------------------------------
+
+const TARGET = 830;
+
+let imageDirHandle = null;
+let imageFiles = [];       // liste triée des noms de fichiers .png
+let csvHandle = null;
+let existingPairs = new Set();  // paires déjà annotées (n'importe quel label)
+let countSim = 0;
+let countDiff = 0;
+let currentPair = null;    // [nameA, nameB]
+let currentUrls = [];      // object URLs à révoquer
+
+function log(msg, target = "log-list") {
+  const el = document.getElementById(target);
+  const line = document.createElement("div");
+  const t = new Date().toLocaleTimeString();
+  line.textContent = `[${t}] ${msg}`;
+  el.prepend(line);
+}
+
+function updateCounters() {
+  document.getElementById("count-sim").textContent = countSim;
+  document.getElementById("count-diff").textContent = countDiff;
+  document.getElementById("bar-sim").style.width = Math.min(100, (countSim / TARGET) * 100) + "%";
+  document.getElementById("bar-diff").style.width = Math.min(100, (countDiff / TARGET) * 100) + "%";
+
+  if (countSim >= TARGET && countDiff >= TARGET) {
+    setStage("done");
+  }
+}
+
+function setStage(stage) {
+  ["empty", "pair", "done"].forEach(s => {
+    document.getElementById("stage-" + s).classList.toggle("active", s === stage);
+  });
+}
+
+document.getElementById("btn-continue-anyway").addEventListener("click", () => {
+  setStage("pair");
+  pickNextPair();
+});
+
+// --- Sélection du dossier d'images ---
+document.getElementById("btn-pick-folder").addEventListener("click", async () => {
+  try {
+    imageDirHandle = await window.showDirectoryPicker();
+    imageFiles = [];
+    for await (const entry of imageDirHandle.values()) {
+      if (entry.kind === "file" && /\.png$/i.test(entry.name)) {
+        imageFiles.push(entry.name);
+      }
+    }
+    imageFiles.sort();
+    document.getElementById("status-folder").textContent =
+      `${imageFiles.length} images trouvées ✓`;
+    document.getElementById("status-folder").classList.add("ok");
+    log(`Dossier sélectionné : ${imageFiles.length} images .png trouvées.`);
+    maybeStart();
+  } catch (e) {
+    if (e.name !== "AbortError") console.error(e);
+  }
+});
+
+// --- Chargement commun d'un handle CSV (existant ou tout juste créé) ---
+async function loadCsvHandle(handle, { isNew }) {
+  csvHandle = handle;
+  await csvHandle.requestPermission({ mode: "readwrite" });
+
+  let text = "";
+  try {
+    text = await readAllText(csvHandle);
+  } catch (e) {
+    text = "";
+  }
+
+  existingPairs = new Set();
+  countSim = 0;
+  countDiff = 0;
+
+  if (text.trim().length > 0) {
+    const rows = parseCsv(text);
+    for (const row of rows) {
+      if (row[0] === "image_1") continue; // en-tête
+      const [a, b, label] = row;
+      if (!a || !b) continue;
+      existingPairs.add(pairKey(a, b));
+      if (label === "1") countSim++;
+      else if (label === "2") countDiff++;
+    }
+    log(`CSV chargé : ${rows.length - 1} lignes existantes, ${countSim} similaires, ${countDiff} différentes.`);
+  } else {
+    await writeHeaderIfNeeded();
+    log(isNew ? "Nouveau fichier CSV créé avec en-tête." : "Fichier CSV vide : en-tête ajouté.");
+  }
+
+  document.getElementById("status-csv").textContent = `${csvHandle.name} ✓`;
+  document.getElementById("status-csv").classList.add("ok");
+  updateCounters();
+  maybeStart();
+}
+
+// --- Reprendre un CSV existant (sélecteur "ouvrir") ---
+document.getElementById("btn-open-csv").addEventListener("click", async () => {
+  try {
+    const [handle] = await window.showOpenFilePicker({
+      types: [{ description: "CSV", accept: { "text/csv": [".csv"] } }],
+      excludeAcceptAllOption: false,
+      multiple: false
+    });
+    await loadCsvHandle(handle, { isNew: false });
+  } catch (e) {
+    if (e.name !== "AbortError") console.error(e);
+  }
+});
+
+// --- Créer un nouveau CSV (sélecteur "enregistrer") ---
+document.getElementById("btn-new-csv").addEventListener("click", async () => {
+  try {
+    const handle = await window.showSaveFilePicker({
+      suggestedName: "dataset.csv",
+      types: [{ description: "CSV", accept: { "text/csv": [".csv"] } }]
+    });
+    await loadCsvHandle(handle, { isNew: true });
+  } catch (e) {
+    if (e.name !== "AbortError") console.error(e);
+  }
+});
+
+async function writeHeaderIfNeeded() {
+  const writable = await csvHandle.createWritable();
+  await writable.write("image_1,image_2,label\n");
+  await writable.close();
+}
+
+async function appendRow(a, b, label) {
+  // Relit le fichier, ajoute la ligne, réécrit (fichier petit, pas de souci de perf)
+  let text = "";
+  try {
+    text = await readAllText(csvHandle);
+  } catch (e) {
+    text = "image_1,image_2,label\n";
+  }
+  if (!text.endsWith("\n")) text += "\n";
+  text += `${csvEscape(a)},${csvEscape(b)},${label}\n`;
+  const writable = await csvHandle.createWritable();
+  await writable.write(text);
+  await writable.close();
+}
+
+function maybeStart() {
+  if (imageDirHandle && csvHandle && imageFiles.length > 0) {
+    if (countSim >= TARGET && countDiff >= TARGET) {
+      setStage("done");
+    } else {
+      setStage("pair");
+      pickNextPair();
+    }
+  }
+}
+
+// --- Génération adaptative d'une paire non encore annotée ---
+// Écart maximal (en position dans la liste triée) considéré comme "probablement même rafale"
+const NEARBY_MAX_GAP = 8;
+
+function pickNextPair() {
+  if (imageFiles.length < 2) return;
+
+  const simDone = countSim >= TARGET;
+  const diffDone = countDiff >= TARGET;
+
+  // Si "similaires" a atteint l'objectif, on évite les paires proches (probable similaire).
+  // Si "différentes" a atteint l'objectif, on force les paires proches.
+  // Sinon, comportement adaptatif habituel.
+  let preferNearby;
+  if (simDone && !diffDone) preferNearby = false;
+  else if (diffDone && !simDone) preferNearby = true;
+  else preferNearby = countSim < countDiff;
+
+  let attempts = 0;
+  let a, b, key;
+  const n = imageFiles.length;
+
+  do {
+    if (preferNearby) {
+      const i = Math.floor(Math.random() * n);
+      let gap = 1 + Math.floor(Math.random() * NEARBY_MAX_GAP);
+      let j = i + (Math.random() < 0.5 ? -gap : gap);
+      j = Math.max(0, Math.min(n - 1, j));
+      a = imageFiles[i];
+      b = imageFiles[j];
+    } else {
+      // paires éloignées pour limiter les faux "similaires"
+      const i = Math.floor(Math.random() * n);
+      let gap = NEARBY_MAX_GAP * 3 + Math.floor(Math.random() * (n - NEARBY_MAX_GAP * 3));
+      let j = (i + gap) % n;
+      a = imageFiles[i];
+      b = imageFiles[j];
+    }
+    key = pairKey(a, b);
+    attempts++;
+  } while ((a === b || existingPairs.has(key)) && attempts < 500);
+
+  if (attempts >= 500) {
+    log("⚠️ Impossible de trouver une nouvelle paire dans la stratégie préférée, essai en aléatoire pur.");
+    attempts = 0;
+    do {
+      a = imageFiles[Math.floor(Math.random() * n)];
+      b = imageFiles[Math.floor(Math.random() * n)];
+      key = pairKey(a, b);
+      attempts++;
+    } while ((a === b || existingPairs.has(key)) && attempts < 500);
+    if (attempts >= 500) {
+      log("⚠️ Plus aucune paire disponible.");
+      return;
+    }
+  }
+
+  currentPair = [a, b];
+  displayPair(a, b);
+}
+
+function skipPair() {
+  if (!currentPair) return;
+  log(`⏭️ Paire passée : ${currentPair[0]} <-> ${currentPair[1]} (non enregistrée).`);
+  pickNextPair();
+}
+
+document.getElementById("btn-skip").addEventListener("click", skipPair);
+
+async function displayPair(a, b) {
+  // révoque les anciennes URLs
+  currentUrls.forEach(u => URL.revokeObjectURL(u));
+  currentUrls = [];
+
+  const [fileA, fileB] = await Promise.all([
+    imageDirHandle.getFileHandle(a).then(h => h.getFile()),
+    imageDirHandle.getFileHandle(b).then(h => h.getFile())
+  ]);
+
+  const urlA = URL.createObjectURL(fileA);
+  const urlB = URL.createObjectURL(fileB);
+  currentUrls.push(urlA, urlB);
+
+  document.getElementById("img-left").src = urlA;
+  document.getElementById("img-right").src = urlB;
+  document.getElementById("fname-left").textContent = a;
+  document.getElementById("fname-right").textContent = b;
+}
+
+async function recordDecision(label) {
+  if (!currentPair) return;
+  const [a, b] = currentPair;
+  const key = pairKey(a, b);
+
+  await appendRow(a, b, label);
+  existingPairs.add(key);
+  if (label === 1) countSim++;
+  else countDiff++;
+
+  log(`${a} <-> ${b} → label ${label} (${label === 1 ? "similaire" : "différente"})`);
+  updateCounters();
+  showFlash(label === 1 ? "Similaire ✓" : "Différente ✓");
+
+  if (countSim >= TARGET && countDiff >= TARGET) {
+    setStage("done");
+  } else {
+    pickNextPair();
+  }
+}
+
+document.addEventListener("keydown", (e) => {
+  const annotateVisible = document.getElementById("panel-annotate").classList.contains("active");
+  const pairStageVisible = document.getElementById("stage-pair").classList.contains("active");
+  if (!annotateVisible || !pairStageVisible) return;
+
+  if (e.key === "1") recordDecision(1);
+  else if (e.key === "2") recordDecision(2);
+  else if (e.key === " ") { e.preventDefault(); skipPair(); }
+});
+
+// ---------------------------------------------------------------
+// ONGLET PAIRES IDENTIQUES
+// ---------------------------------------------------------------
+
+let identicalDirHandle = null;
+let identicalFiles = [];
+let identicalCsvHandle = null;
+
+document.getElementById("btn-pick-folder-identical").addEventListener("click", async () => {
+  try {
+    identicalDirHandle = await window.showDirectoryPicker();
+    identicalFiles = [];
+    for await (const entry of identicalDirHandle.values()) {
+      if (entry.kind === "file" && /\.png$/i.test(entry.name)) {
+        identicalFiles.push(entry.name);
+      }
+    }
+    identicalFiles.sort();
+    document.getElementById("status-folder-identical").textContent =
+      `${identicalFiles.length} images trouvées ✓`;
+    document.getElementById("status-folder-identical").classList.add("ok");
+    log(`Dossier des identiques : ${identicalFiles.length} images trouvées.`, "log-list-identical");
+    checkIdenticalReady();
+  } catch (e) {
+    if (e.name !== "AbortError") console.error(e);
+  }
+});
+
+async function setIdenticalCsvHandle(handle) {
+  identicalCsvHandle = handle;
+  await identicalCsvHandle.requestPermission({ mode: "readwrite" });
+  document.getElementById("status-csv-identical").textContent = `${identicalCsvHandle.name} ✓`;
+  document.getElementById("status-csv-identical").classList.add("ok");
+  log(`Fichier CSV cible sélectionné : ${identicalCsvHandle.name}`, "log-list-identical");
+  checkIdenticalReady();
+}
+
+document.getElementById("btn-open-csv-identical").addEventListener("click", async () => {
+  try {
+    const [handle] = await window.showOpenFilePicker({
+      types: [{ description: "CSV", accept: { "text/csv": [".csv"] } }],
+      excludeAcceptAllOption: false,
+      multiple: false
+    });
+    await setIdenticalCsvHandle(handle);
+  } catch (e) {
+    if (e.name !== "AbortError") console.error(e);
+  }
+});
+
+document.getElementById("btn-new-csv-identical").addEventListener("click", async () => {
+  try {
+    const handle = await window.showSaveFilePicker({
+      suggestedName: "dataset.csv",
+      types: [{ description: "CSV", accept: { "text/csv": [".csv"] } }]
+    });
+    await setIdenticalCsvHandle(handle);
+  } catch (e) {
+    if (e.name !== "AbortError") console.error(e);
+  }
+});
+
+function checkIdenticalReady() {
+  document.getElementById("btn-generate-identical").disabled =
+    !(identicalDirHandle && identicalCsvHandle && identicalFiles.length > 0);
+}
+
+document.getElementById("btn-generate-identical").addEventListener("click", async () => {
+  let text = "";
+  try {
+    text = await readAllText(identicalCsvHandle);
+  } catch (e) {
+    text = "image_1,image_2,label\n";
+  }
+
+  const existing = new Set();
+  const rows = parseCsv(text);
+  for (const row of rows) {
+    if (row[0] === "image_1") continue;
+    existing.add(pairKey(row[0], row[1]) + "||" + row[2]);
+  }
+
+  let added = 0;
+  let skipped = 0;
+  if (!text.endsWith("\n")) text += "\n";
+
+  for (const name of identicalFiles) {
+    const sig = pairKey(name, name) + "||0";
+    if (existing.has(sig)) {
+      skipped++;
+      continue;
+    }
+    text += `${csvEscape(name)},${csvEscape(name)},0\n`;
+    added++;
+  }
+
+  const writable = await identicalCsvHandle.createWritable();
+  await writable.write(text);
+  await writable.close();
+
+  document.getElementById("status-generate-identical").textContent =
+    `${added} paires ajoutées, ${skipped} déjà présentes.`;
+  log(`${added} paires identiques (label 0) ajoutées au CSV, ${skipped} ignorées (déjà présentes).`, "log-list-identical");
+});
+</script>
+
+</body>
+</html>
