@@ -1,0 +1,211 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[french]{babel}
+\usepackage{geometry}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{enumitem}
+\geometry{margin=2.5cm}
+
+\title{Calibration du vote majoritaire du garde-fou de transmission\\
+	\large Note méthodologique pour les rédacteurs de l'article}
+\author{Projet AgriSense}
+\date{}
+
+\begin{document}
+	\maketitle
+	
+	\section{Objet de la note}
+	Cette note décrit comment les seuils du garde-fou ont été calibrés, quels résultats ont été obtenus et
+	quels seuils sont retenus. Le mécanisme n'est pas modifié : une image est transmise si \textbf{au moins
+		deux critères sur trois} dépassent leur seuil (vote majoritaire). Seule la valeur des seuils est optimisée.
+	
+	\section{Le mécanisme}
+	Pour chaque paire (image précédente, nouvelle image), trois critères sont calculés.
+	\begin{itemize}[nosep]
+		\item \textbf{HIST} : distance de Bhattacharyya entre les histogrammes couleur globaux (4~classes par canal RGB).
+		\item \textbf{MEAN} : écart moyen, sur les trois canaux, entre les médianes des deux images.
+		\item \textbf{PROP} : pourcentage de blocs de $32\times32$ pixels dont la distance de Bhattacharyya
+		dépasse un \emph{seuil de bloc}. Une image $640\times480$ contient 300 blocs.
+	\end{itemize}
+	Chaque critère vote « transmettre » lorsqu'il est \textbf{strictement supérieur} à son seuil. PROP comporte
+	donc deux paramètres : le seuil de bloc (décision pour chaque bloc) et le seuil PROP (décision pour l'image
+	entière). Au total, quatre valeurs sont calibrées : HIST, MEAN, PROP et le seuil de bloc.
+	
+	\section{Données}
+	Le jeu de calibration contient 2\,503 paires d'images étiquetées :
+	\begin{center}
+		\begin{tabular}{lrl}
+			\toprule
+			Étiquette & Paires & Signification \\
+			\midrule
+			0 & 840 & auto-paires (image comparée à elle-même), métriques nulles \\
+			1 & 831 & images similaires (ne pas transmettre) \\
+			2 & 832 & images différentes (transmettre) \\
+			\bottomrule
+		\end{tabular}
+	\end{center}
+	La classe positive est l'étiquette~2. Deux scénarios sont rapportés :
+	\begin{itemize}[nosep]
+		\item \textbf{hard} (scénario principal) : étiquettes 1 et 2 uniquement, $n=1\,663$. Les auto-paires sont exclues
+		car leurs métriques valent 0 et rendent le problème trivial.
+		\item \textbf{all} : toutes les étiquettes, $n=2\,503$. Il est optimiste et n'est donné qu'à titre indicatif.
+	\end{itemize}
+	Le jeu est équilibré par construction : il ne reflète pas la fréquence réelle des changements sur le terrain.
+	Aucune estimation de cette fréquence n'a été faite.
+	
+	\section{Méthode de calibration}
+	
+	\subsection{Recherche des seuils}
+	Pour chaque critère, une grille de 25 valeurs est construite à partir des percentiles 2 à 98 des données
+	d'entraînement. Toutes les combinaisons (HIST, MEAN, PROP) sont évaluées pour chacun des cinq seuils de bloc
+	candidats (0,05 ; 0,1 ; 0,2 ; 0,3 ; 0,5). Le point retenu est le centre du plateau quasi-optimal (tolérance
+	0,002), plutôt que le premier maximum, afin de favoriser la stabilité.
+	
+	\subsection{Objectifs opérationnels}
+	\begin{itemize}[nosep]
+		\item \texttt{bacc} : maximiser l'exactitude équilibrée, moyenne du recall (vrais changements détectés) et de la
+		spécificité (images sans changement écartées).
+		\item \texttt{spec@0.95} et \texttt{spec@0.98} : maximiser la spécificité sous une contrainte de recall d'au moins 0,95
+		ou 0,98.
+	\end{itemize}
+	
+	\subsection{Deux méthodes de calibration comparées}
+	\begin{description}[nosep]
+		\item[Classique.] Le meilleur point de grille est choisi sur tout l'entraînement. Pour les objectifs \texttt{spec@}, la
+		contrainte de recall est testée sur la borne basse de Wilson ($z=1{,}645$). Le seuil de bloc est choisi par
+		validation croisée interne (3~folds).
+		\item[Robuste.] Chaque point de grille est évalué sur 200 rééchantillons de 20 blocs temporels de l'entraînement.
+		On retient le point dont la performance est atteinte dans 90\,\% des rééchantillons, et non seulement en moyenne. Le
+		seuil de bloc est choisi dans la même procédure.
+	\end{description}
+	
+	\subsection{Validation}
+	La performance est estimée hors échantillon par \textbf{validation croisée imbriquée} :
+	\begin{itemize}[nosep]
+		\item cinq folds externes découpés en \textbf{blocs temporels} (ordre des numéros d'image) ;
+		\item \textbf{purge} : toute paire d'entraînement partageant une image avec le fold de test est retirée
+		(entre 135 et 224 paires selon le fold), car les paires forment une composante connexe et un découpage aléatoire
+		laisserait fuir de l'information ;
+		\item les seuils de chaque fold sont calculés sans jamais voir ses données de test.
+	\end{itemize}
+	Les intervalles de confiance à 95\,\% sont obtenus par bootstrap par blocs temporels (2\,000 rééchantillons, 40 blocs).
+	Les différences entre méthodes sont appariées sur les mêmes rééchantillons.
+	
+	\section{Résultats}
+	
+	\subsection{Pouvoir discriminant des critères (scénario \textit{hard})}
+	\begin{center}
+		\begin{tabular}{lc}
+			\toprule
+			Critère & AUC [IC 95\,\%] \\
+			\midrule
+			HIST & 0,958 [0,947 ; 0,970] \\
+			MEAN & 0,876 [0,856 ; 0,897] \\
+			PROP (bloc 0,05) & 0,987 [0,981 ; 0,992] \\
+			PROP (bloc 0,1) & 0,987 [0,980 ; 0,992] \\
+			\bottomrule
+		\end{tabular}
+	\end{center}
+	PROP est le critère le plus discriminant, MEAN le moins.
+	
+	\subsection{Performances hors échantillon (scénario \textit{hard})}
+	\begin{center}
+		\small
+		\begin{tabular}{llcccc}
+			\toprule
+			Objectif & Méthode & Recall & Spécificité & Bal.\ acc. & Recall du pire fold \\
+			\midrule
+			\texttt{bacc} & classique & 0,944 & 0,961 & 0,953 & 0,871 \\
+			\texttt{bacc} & robuste   & 0,944 & 0,954 & 0,949 & 0,806 \\
+			\addlinespace
+			\texttt{spec@0.95} & classique & 0,939 & 0,929 & 0,934 & 0,742 \\
+			\texttt{spec@0.95} & robuste   & 0,936 & 0,948 & 0,942 & 0,742 \\
+			\addlinespace
+			\texttt{spec@0.98} & classique & 0,987 & 0,798 & 0,892 & 0,944 \\
+			\texttt{spec@0.98} & robuste   & 0,982 & 0,845 & 0,913 & 0,935 \\
+			\bottomrule
+		\end{tabular}
+	\end{center}
+	Intervalles de confiance à 95\,\% pour \texttt{bacc} classique : recall $[0{,}917 ; 0{,}966]$, spécificité $[0{,}940 ; 0{,}980]$.
+	
+	Principales observations :
+	\begin{itemize}[nosep]
+		\item En \texttt{bacc}, la méthode robuste ne fait pas mieux que la classique (différences non significatives) et son
+		pire fold est moins bon.
+		\item Aux objectifs \texttt{spec@}, la méthode robuste gagne en spécificité à recall comparable :
+		$+0{,}019$ $[+0{,}003 ; +0{,}042]$ pour \texttt{spec@0.95} et $+0{,}047$ $[+0{,}028 ; +0{,}068]$
+		pour \texttt{spec@0.98} (intervalles excluant 0).
+		\item La cible de recall de 0,95 n'est tenue en moyenne par aucune méthode (0,936 à 0,939), et seuls 3~folds sur~5
+		l'atteignent. Ce réglage ne doit pas être présenté comme garantissant 95\,\%.
+	\end{itemize}
+	
+	\subsection{Erreurs réelles du réglage retenu}
+	Décisions hors échantillon de la méthode classique, objectif \texttt{bacc}, scénario \textit{hard} :
+	\begin{center}
+		\begin{tabular}{lcc}
+			\toprule
+			& Bloquées (0) & Envoyées (1) \\
+			\midrule
+			Paires similaires (831) & 799 (96,1\,\%) & \textbf{32} (3,9\,\%) \\
+			Paires différentes (832) & \textbf{47} (5,6\,\%) & 785 (94,3\,\%) \\
+			\bottomrule
+		\end{tabular}
+	\end{center}
+	Les 32 paires similaires envoyées sont des transmissions inutiles. Les 47 paires différentes bloquées sont des
+	changements non transmis, l'erreur la plus grave pour l'application. Avec la méthode robuste, on obtient 38 et 47.
+	
+	\section{Seuils retenus}
+	Le réglage retenu est celui de l'objectif \texttt{bacc}, calibré par la méthode classique sur l'ensemble du scénario
+	\textit{hard} :
+	\begin{center}
+		\begin{tabular}{lc}
+			\toprule
+			Paramètre & Valeur \\
+			\midrule
+			Seuil HIST & $> 0{,}00275$ \\
+			Seuil MEAN & $> 16{,}67$ \\
+			Seuil PROP & $> 64\,\%$ des blocs \\
+			Seuil de bloc (dans PROP) & $0{,}05$ \\
+			Règle de décision & au moins 2 critères sur 3 \\
+			\bottomrule
+		\end{tabular}
+	\end{center}
+	Avec 300 blocs, un seuil de 64\,\% signifie plus de 192 blocs, soit au moins 193 blocs « changés ».
+	
+	\paragraph{Justification.} Ce réglage a le meilleur compromis global hors échantillon en \texttt{bacc}, et le pire fold le
+	moins mauvais. Le seuil de bloc 0,05 est sélectionné dans les 5~folds, et le seuil PROP varie peu (55,5 à 69,9\,\%
+	selon les folds). L'objectif \texttt{bacc} traite de façon symétrique les transmissions inutiles et les changements
+	non transmis.
+	
+	\paragraph{Alternative prudente.} Pour ne presque rien rater, l'objectif \texttt{spec@0.98} détecte environ 98,7\,\% des vrais
+	changements (classique) au prix de 20\,\% de transmissions inutiles en plus. Les seuils de la méthode robuste étant
+	instables pour cet objectif (intervalles de confiance très larges sur HIST et MEAN), ce réglage doit être présenté avec réserve.
+	
+	\section{Limites à mentionner dans l'article}
+	\begin{itemize}
+		\item \textbf{Les gains ne sont pas mesurés en énergie.} Aucune mesure énergétique n'a été faite : l'article doit
+		exprimer les bénéfices en \emph{transmissions inutiles évitées} (environ 96\,\% des paires similaires bloquées), non en énergie.
+		\item \textbf{Fréquence réelle des changements inconnue.} Le jeu est équilibré : le taux global de transmissions
+		évitées sur le terrain n'est pas estimable avec ces données.
+		\item \textbf{Variabilité entre périodes.} Le pire fold rate 12,9\,\% des vrais changements (recall 0,871), contre 5,6\,\%
+		en moyenne.
+		\item \textbf{Rôle limité de MEAN.} Dans le réglage retenu, MEAN n'est décisif que dans environ 12\,\% des paires : le vote
+		se joue surtout entre HIST et PROP.
+		\item \textbf{Scénario \textit{all}.} Il inclut les auto-paires triviales et surestime les performances ; il ne doit pas
+		être utilisé comme résultat principal.
+		\item \textbf{Comparaison avec l'existant non réalisée.} L'amélioration par rapport aux seuils actuels de l'article n'a pas encore
+		été mesurée (voir ci-dessous).
+	\end{itemize}
+	
+	\section{À faire avant soumission}
+	\begin{enumerate}[nosep]
+		\item Relancer la calibration avec \texttt{--article-thresholds HIST,MEAN,PROP --article-block B} pour chiffrer le gain par
+		rapport aux seuils actuels, avec un intervalle de confiance.
+		\item Vérifier que le firmware reproduit exactement les métriques du script : résolution $640\times480$, blocs $32\times32$,
+		histogrammes à 4 classes par canal, distance de Bhattacharyya, comparaison stricte $>$.
+		\item Idéalement, valider le réglage retenu sur un jeu collecté séparément (autre période ou autre site).
+	\end{enumerate}
+	
+\end{document}
